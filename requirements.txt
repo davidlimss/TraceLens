@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+streamlit
+langgraph
+langchain
+langchain-ollama
+mcp
+pandas
+scikit-learn
+xgboost
+shap
+pytest
+python-dotenv
+pydantic
