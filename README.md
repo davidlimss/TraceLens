@@ -2,9 +2,28 @@
 
 Evidence-grounded, agentic security-log investigation for defensive operations.
 
+[![Security and Quality](https://github.com/davidlimss/TraceLens/actions/workflows/security-quality.yml/badge.svg)](https://github.com/davidlimss/TraceLens/actions/workflows/security-quality.yml)
+[![Project Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](backend/pyproject.toml)
+[![Node.js 22](https://img.shields.io/badge/node-22-339933.svg)](frontend/package.json)
+[![License: Not declared](https://img.shields.io/badge/license-not%20declared-lightgrey.svg)](#license)
+
 TraceLens converts heterogeneous raw logs into normalized events, deterministic timelines, correlated entities, findings, risk scores, and AI-assisted conclusions that remain traceable to original evidence.
 
 > TraceLens is an investigation aid, not an autonomous incident-response authority. Human review remains required for high-impact decisions.
+
+## Project status
+
+TraceLens is currently an **alpha-stage research and engineering project**. The repository includes a production-oriented baseline, but it is not yet certified for unattended production use. Release readiness is governed through documented quality, security, operations, and evidence-integrity gates.
+
+| Area | Current state | Source of truth |
+|---|---|---|
+| Product scope | Active development | [Project charter](docs/PROJECT_CHARTER.md) |
+| Delivery plan | Milestone-based roadmap | [Roadmap](docs/ROADMAP.md) |
+| Risks and decisions | Reviewed as repository changes | [RAID register](docs/RAID.md) and [decision log](docs/DECISIONS.md) |
+| Quality | Automated CI and local validation | [Security and Quality workflow](.github/workflows/security-quality.yml) |
+| Production readiness | Conditional; gaps remain | [Production readiness](docs/PRODUCTION_READINESS.md) |
+| Releases | SemVer-oriented documented process | [Release process](docs/RELEASE_PROCESS.md) |
 
 ## Core principles
 
@@ -410,6 +429,13 @@ Do not use TraceLens as the sole basis for legal conclusions, attacker attributi
 - [Production readiness](docs/PRODUCTION_READINESS.md)
 - [Build validation report](docs/BUILD_VALIDATION_REPORT.md)
 - [Implementation report](docs/IMPLEMENTATION_REPORT.md)
+- [Project charter](docs/PROJECT_CHARTER.md)
+- [Roadmap](docs/ROADMAP.md)
+- [RAID register](docs/RAID.md)
+- [Decision log](docs/DECISIONS.md)
+- [Release process](docs/RELEASE_PROCESS.md)
+- [Changelog](CHANGELOG.md)
+- [Support guide](SUPPORT.md)
 
 ## Contributing
 

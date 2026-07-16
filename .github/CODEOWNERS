@@ -1,0 +1,11 @@
+# Default ownership
+* @davidlimss
+
+# Security- and evidence-sensitive paths
+/backend/app/auth.py @davidlimss
+/backend/app/security.py @davidlimss
+/backend/app/claim_verifier.py @davidlimss
+/backend/app/llm_gateway.py @davidlimss
+/backend/alembic/ @davidlimss
+/.github/ @davidlimss
+/SECURITY.md @davidlimss
