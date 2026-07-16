@@ -1,816 +1,420 @@
 # TraceLens AI
 
-TraceLens AI adalah aplikasi investigasi log keamanan siber berbasis agentic AI yang mengubah log mentah heterogen menjadi event terstruktur, timeline insiden, korelasi entity, finding, risk score, dan jawaban AI yang dapat ditelusuri kembali ke baris log asli.
+Evidence-grounded, agentic security-log investigation for defensive operations.
 
-Prinsip utama aplikasi adalah **evidence-grounded investigation**:
+TraceLens converts heterogeneous raw logs into normalized events, deterministic timelines, correlated entities, findings, risk scores, and AI-assisted conclusions that remain traceable to original evidence.
 
-- parsing, deteksi format, normalisasi timestamp, sorting, correlation, dan risk scoring dilakukan secara deterministik oleh Python;
-- LLM hanya digunakan untuk memilih tool investigasi, melakukan interpretasi, menyusun hipotesis, chat, dan laporan;
-- setiap claim AI harus memiliki status `fact`, `inference`, atau `hypothesis`;
-- setiap claim harus merujuk `evidence_id` yang valid pada case aktif;
-- backend memverifikasi claim sebelum respons ditampilkan;
-- apabila bukti tidak mencukupi, sistem menjawab bahwa bukti belum cukup;
-- raw log disimpan bersama nomor baris dan tidak boleh ditimpa setelah menjadi event.
+> TraceLens is an investigation aid, not an autonomous incident-response authority. Human review remains required for high-impact decisions.
 
-## Daftar isi
+## Core principles
 
-- [Fitur MVP](#fitur-mvp)
-- [Format log](#format-log-yang-didukung)
-- [Arsitektur](#arsitektur-sistem)
-- [Struktur proyek](#struktur-proyek)
-- [Persyaratan](#persyaratan)
-- [Menjalankan aplikasi](#menjalankan-aplikasi)
-- [Credential login](#credential-login)
-- [Cara menggunakan](#cara-menggunakan-aplikasi)
-- [Konfigurasi AI](#konfigurasi-github-models)
-- [Pipeline deterministik](#pipeline-ingestion-dan-analisis)
-- [AI dan claim verification](#ai-investigator-dan-claim-verification)
-- [Keamanan](#kontrol-keamanan)
-- [API](#ringkasan-api)
-- [Testing](#menjalankan-test)
-- [Troubleshooting](#troubleshooting)
-- [Batasan](#batasan-mvp)
-- [Dokumentasi lanjutan](#dokumentasi-lanjutan)
+- Parsing, timestamp normalization, ordering, correlation, detection, and risk scoring are deterministic.
+- The LLM selects read-only investigation tools and interprets structured evidence.
+- Every accepted AI claim must cite valid evidence from the active case.
+- Claims are explicitly classified as `fact`, `inference`, or `hypothesis`.
+- Unsupported claims are removed by the backend before display.
+- Raw evidence retains its source line number and is protected against mutation.
+- Insufficient evidence produces an explicit insufficient-evidence response.
 
-## Fitur MVP
+## Capabilities
 
-### Case management
+### Investigation workspace
 
-- membuat case investigasi;
-- membership dan permission per case;
-- halaman dashboard untuk melihat ringkasan evidence, event, entity, rentang waktu, dan risiko;
-- audit aktivitas penting pada case.
+- Case-based access control and membership.
+- Evidence upload with integrity metadata and SHA-256 hashes.
+- Asynchronous parsing through Redis and Celery.
+- Deterministic cross-file timelines.
+- Searchable event explorer with surrounding context.
+- Entity correlation across IP addresses, users, sessions, hosts, and processes.
+- Detection findings with MITRE ATT&CK mappings.
+- Explainable risk scoring with versioned component breakdowns.
+- Evidence-grounded AI investigator with clickable citations.
+- Formal Markdown and monochrome PDF reports.
+- Audit records for security-sensitive operations.
 
-### Evidence ingestion
+### Supported log formats
 
-- drag-and-drop upload;
-- validasi ukuran, extension, MIME type, UTF-8, nama file, dan format berdasarkan isi;
-- perhitungan SHA-256 saat upload;
-- file disimpan menggunakan nama UUID, bukan nama file dari pengguna;
-- parsing asynchronous melalui Redis dan Celery;
-- progress, heartbeat, retry, serta deteksi job macet;
-- mode `strict` dan `quarantine`;
-- verifikasi ulang hash secara manual, periodik, dan sebelum export.
-
-### Analisis deterministik
-
-- schema event kanonik;
-- timestamp normalization dengan provenance dan confidence;
-- timeline lintas file dengan urutan stabil;
-- correlation berdasarkan IP, username, dan session;
-- alasan correlation yang dapat dibaca manusia;
-- deteksi brute force, password spraying, distributed guessing, suspicious PowerShell, web exploitation, persistence, dan privilege escalation;
-- pemetaan MITRE ATT&CK, confidence evidence terpisah dari risk, pertimbangan false positive, dan query investigasi lanjutan;
-- risk score 0–1 dengan breakdown komponen dan versi formula.
-
-### AI Investigator
-
-- single agent dengan beberapa database tools read-only;
-- GitHub Models API, default `openai/gpt-4.1-mini`;
-- supporting dan contradicting evidence;
-- badge `fact`, `inference`, dan `hypothesis`;
-- confidence, reasoning summary, limitations, dan kebutuhan evidence tambahan;
-- citation yang dapat diklik untuk membuka raw log;
-- claim verification gate di backend;
-- jawaban insufficient-evidence bila tidak ada claim yang lolos.
-
-### Reporting
-
-- daftar finding dan risk breakdown;
-- export Markdown;
-- export PDF investigasi langsung dari backend;
-- evidence hash, integrity status, completeness, dan versi transformasi pada laporan;
-- acknowledgement wajib apabila evidence diproses dengan warning.
-
-## Format log yang didukung
-
-| Format | Contoh | Fokus parser |
+| Format | Typical input | Coverage |
 |---|---|---|
-| Linux auth/syslog | `auth.log`, `syslog` | SSH login gagal/berhasil, sudo, privilege event |
-| Nginx/Apache | combined access log | IP, method, path, status, user-agent, timestamp |
-| JSON/JSONL generik | satu object JSON per baris | timestamp, level, message, user, IP, session |
-| CSV aplikasi generik | header dan satu record per baris | alias kolom umum untuk timestamp, level, message, user, IP |
-| Cowrie JSON | `cowrie.json` | login, command, session, IP, dan username honeypot |
-| Windows/Sysmon JSON | JSON export | 4624/4625, process creation, file creation, dan service install |
-| AWS CloudTrail JSONL | satu event per baris | event name, identity, source IP, dan error outcome |
-| Suricata EVE JSON | `eve.json` | network alert, source/destination, protocol, dan severity |
-| Logfmt | Ollama dan aplikasi Go | timestamp, level, message, service, session, dan endpoint |
-| Plain text fallback | UTF-8 line-oriented log | ingestion low-confidence tanpa klaim semantik berlebihan |
+| Linux authentication | `auth.log`, `secure` | SSH, authentication, sudo, users, and source IPs |
+| Web access | Apache/Nginx combined logs | Request method, path, status, client IP, and user agent |
+| Generic application CSV | Header plus one record per line | Common timestamp, level, message, user, and IP aliases |
+| Generic JSON/JSONL | Object per line | Structured application and security events |
+| Cowrie JSON | `cowrie.json` | Honeypot login, commands, sessions, IPs, and users |
+| Windows/Sysmon JSON | Exported JSON | Authentication, process, file, and service events |
+| AWS CloudTrail JSONL | Event per line | Identity, source IP, API activity, and error outcomes |
+| Suricata EVE JSON | `eve.json` | Network alerts, endpoints, protocol, and severity |
+| Logfmt | Go and Ollama-style logs | Timestamp, level, service, message, session, and endpoint |
+| Plain text | UTF-8 text logs | Conservative fallback parsing |
 
-Deteksi format dilakukan dari pola baris awal file. Extension hanya menjadi salah satu lapisan validasi dan tidak menentukan parser sendirian.
+Format detection is content-based. A file extension is only one validation signal and does not select a parser by itself.
 
-Belum didukung secara native: binary Windows EVTX, PCAP, archive terkompresi, SIEM streaming, dan real-time tail. Format tersebut perlu diekspor lebih dahulu ke JSON/JSONL/CSV/text.
+Binary EVTX, PCAP, compressed archives, live SIEM streaming, and real-time tailing are not natively supported. Export those sources to JSON, JSONL, CSV, or text first.
 
-## Arsitektur sistem
-
-```mermaid
-flowchart LR
-    U[Investigator] --> F[Next.js Frontend]
-    F -->|Cookie session + CSRF| B[FastAPI Backend]
-    B --> P[(PostgreSQL)]
-    B --> R[(Redis)]
-    B --> V[(Evidence Volume)]
-    B -->|Enqueue job| W[Celery Worker]
-    W --> R
-    W --> V
-    W --> P
-    S[Celery Beat] --> R
-    B -->|Tool calling| G[GitHub Models]
-    G -->|Draft claims| B
-    B --> C[Claim Verification Gate]
-    C --> F
-```
-
-| Komponen | Teknologi | Tanggung jawab |
-|---|---|---|
-| Frontend | Next.js 15, React, CSS | Login, dashboard, upload, timeline, explorer, chat, finding, export |
-| Backend | FastAPI, SQLAlchemy | Authentication, authorization, API, audit, query, orchestration agent |
-| Database | PostgreSQL 16 | Case, user, membership, evidence, event, correlation, finding, agent run, audit |
-| Queue | Redis 7 | Broker Celery, shared rate-limit counter, dan analysis lock |
-| Worker | Celery | Parsing deterministik, progress job, correlation, finding, integrity job |
-| Scheduler | Celery Beat | Deteksi stuck job dan verifikasi integrity berkala |
-| LLM provider | GitHub Models | Tool selection dan interpretasi evidence |
-| Evidence storage | Docker volume | File evidence asli dengan nama penyimpanan UUID |
-
-## Struktur proyek
+## Architecture
 
 ```text
-loginvestigator-x/
-├── backend/
-│   ├── alembic/              # Database migration
-│   ├── app/
-│   │   ├── agent_tools.py    # Tool database read-only untuk agent
-│   │   ├── auth.py           # Session, password hashing, CSRF, permission
-│   │   ├── claim_verifier.py # Verification gate claim AI
-│   │   ├── engine.py         # Timeline, correlation, finding, risk
-│   │   ├── llm_gateway.py    # GitHub Models tool-calling gateway
-│   │   ├── main.py           # FastAPI endpoints
-│   │   ├── models.py         # SQLAlchemy models
-│   │   ├── parsers.py        # Parser deterministik
-│   │   ├── security.py       # Upload validation dan rate limiting
-│   │   ├── tasks.py          # Celery parsing/integrity tasks
-│   │   └── worker.py         # Celery configuration
-│   ├── tests/                # Test backend
-│   ├── Dockerfile
-│   └── requirements.txt
-├── frontend/
-│   ├── app/                  # Next.js App Router pages
-│   ├── components/           # UI reusable
-│   ├── lib/                  # API client dan TypeScript types
-│   ├── Dockerfile
-│   └── next.config.ts
-├── docs/                     # Arsitektur, threat model, parser guide
-├── samples/                  # Contoh log
-├── docker-compose.yml
-├── .env.example
-└── README.md
+Browser
+  |
+  v
+Next.js frontend :3001
+  |
+  v
+FastAPI backend :8002 ----> PostgreSQL
+  |                         cases, events, findings,
+  |                         users, sessions, and audit
+  |
+  +----> Redis ----> Celery worker / Celery Beat
+  |                  parsing, analysis, integrity jobs
+  |
+  +----> Evidence volume
+  |      immutable source files and hashes
+  |
+  +----> GitHub Models
+         tool selection and evidence interpretation
 ```
 
-## Persyaratan
+| Layer | Technology |
+|---|---|
+| Frontend | Next.js, React, TypeScript, Tailwind CSS |
+| API | FastAPI, Pydantic, SQLAlchemy |
+| Database | PostgreSQL 16 |
+| Queue | Redis 7, Celery |
+| Scheduler | Celery Beat |
+| LLM provider | GitHub Models |
+| Deployment | Docker Compose |
+| Monitoring | Prometheus metrics and SLO rules |
 
-Cara yang direkomendasikan menggunakan Docker Compose:
+See [ARCHITECTURE.md](ARCHITECTURE.md) and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for detailed design decisions.
 
-- Windows 10/11, Linux, atau macOS;
-- Docker Desktop/Docker Engine;
-- Docker Compose v2;
-- koneksi internet saat build pertama dan ketika menggunakan GitHub Models;
-- GitHub Models token dengan permission yang sesuai untuk memakai model.
+## Repository layout
 
-Untuk development tanpa Docker dibutuhkan Python 3.12, Node.js 22, PostgreSQL, dan Redis.
+```text
+TraceLens/
+├── backend/                 FastAPI API, parsers, detection engine, and tests
+│   ├── app/
+│   │   ├── parsers/         Content detection and canonical parsers
+│   │   ├── agent_tools.py   Read-only investigation tools
+│   │   ├── llm_gateway.py   Provider controls and context compaction
+│   │   ├── claim_verifier.py
+│   │   ├── engine.py        Correlation, detection, and risk scoring
+│   │   └── security.py      Upload validation and rate limiting
+│   ├── alembic/             Database migrations
+│   ├── evals/               Agent and detection evaluation harnesses
+│   └── tests/
+├── frontend/                Next.js investigation console
+├── monitoring/              Prometheus and SLO configuration
+├── scripts/                 Validation, backup, restore, and load smoke tests
+├── samples/                 Safe demonstration logs
+├── docs/                    Design, readiness, threat model, and runbooks
+├── docker-compose.yml       Development stack
+└── docker-compose.prod.yml  Hardened production baseline
+```
 
-## Menjalankan aplikasi
+## Quick start
 
-### 1. Siapkan environment
+### Prerequisites
 
-PowerShell:
+- Docker Desktop with Docker Compose.
+- Git.
+- A GitHub Models token with permission to use the configured model.
+- At least 4 GB of available memory is recommended.
+
+### 1. Clone and configure
+
+```bash
+git clone https://github.com/davidlimss/TraceLens.git
+cd TraceLens
+cp .env.example .env
+```
+
+On Windows PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Bash:
+Set secure values in `.env`, especially:
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env`, kemudian minimal ganti nilai berikut:
-
-```env
-POSTGRES_PASSWORD=ganti-password-database
-DATABASE_URL=postgresql+psycopg://loginvestigator:ganti-password-database@postgres:5432/loginvestigator
+```dotenv
+POSTGRES_PASSWORD=replace-with-a-long-random-password
 BOOTSTRAP_ADMIN_USERNAME=admin
-BOOTSTRAP_ADMIN_PASSWORD=ganti-password-admin
-GITHUB_MODELS_TOKEN=isi-token-baru-di-sini
-```
-
-Jangan commit `.env`. File tersebut sudah tercantum di `.gitignore`. Jangan menaruh token asli di `.env.example`.
-
-### 2. Build dan jalankan service
-
-```powershell
-docker compose up -d --build
-```
-
-Baseline hardening produksi (jalankan di belakang HTTPS dengan secret non-default):
-
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
-```
-
-Observability tersedia melalui `/metrics`; SLO, launch gate, dan runbook terdapat di `docs/SLO.md`, `docs/PRODUCTION_READINESS.md`, dan `docs/runbooks/`.
-
-Periksa status:
-
-```powershell
-docker compose ps
-```
-
-Service utama:
-
-- Frontend: http://localhost:3001
-- Login: http://localhost:3001/login
-- Backend API: http://localhost:8002
-- Swagger UI: http://localhost:8002/docs
-- Health check: http://localhost:8002/health
-
-### 3. Melihat log service
-
-```powershell
-docker compose logs -f backend frontend worker scheduler
-```
-
-Tekan `Ctrl+C` untuk keluar dari tampilan log tanpa menghentikan container.
-
-### 4. Menghentikan aplikasi
-
-```powershell
-docker compose down
-```
-
-Perintah tersebut tidak menghapus volume PostgreSQL atau evidence. Untuk keamanan, jangan memakai `docker compose down -v` kecuali benar-benar ingin menghapus seluruh database dan evidence lokal.
-
-## Credential login
-
-Credential dibaca dari `.env`:
-
-```env
-BOOTSTRAP_ADMIN_USERNAME=admin
-BOOTSTRAP_ADMIN_PASSWORD=change-me-local
-```
-
-Nilai di atas hanya default development. Ganti password sebelum aplikasi dapat diakses perangkat lain.
-
-Bootstrap admin dibuat saat startup pertama jika username tersebut belum ada. Mengubah password di `.env` setelah user sudah tersimpan tidak otomatis mengganti password record lama di PostgreSQL.
-
-## Cara menggunakan aplikasi
-
-### 1. Login
-
-1. Buka http://localhost:3001/login.
-2. Masukkan credential bootstrap dari `.env`.
-3. Setelah berhasil, browser menyimpan session HttpOnly dan CSRF cookie.
-
-### 2. Membuat case
-
-1. Pada halaman awal, masukkan nama case.
-2. Tekan **Buat investigasi**.
-3. Aplikasi membuka dashboard case dan menghasilkan UUID case.
-
-Simpan UUID tersebut jika perlu membuka kembali case dari halaman awal.
-
-### 3. Mengunggah log
-
-1. Pilih menu **Unggah**.
-2. Pilih mode parsing:
-   - `strict`: satu baris malformed menggagalkan parsing file;
-   - `quarantine`: baris malformed dicatat terpisah dan event valid tetap diproses.
-3. Drag-and-drop file atau pilih melalui file picker.
-4. Tunggu upload selesai dan monitor progress parsing.
-
-Status umum:
-
-| Status | Arti |
-|---|---|
-| `queued` | Job menunggu worker |
-| `parsing` | Worker sedang membaca dan memproses file |
-| `parsed` | Seluruh file berhasil diproses |
-| `parsed_with_warnings` | Selesai dengan baris quarantine |
-| `failed` | Parsing gagal secara eksplisit |
-| `stuck` | Heartbeat job melewati batas waktu |
-
-### 4. Menelaah timeline dan event
-
-- **Timeline** menampilkan event lintas file dengan urutan deterministik.
-- Filter dapat membatasi severity dan source.
-- Klik event untuk melihat raw log asli dan metadata timestamp.
-- **Penjelajah** menyediakan tabel, search/filter, serta context sebelum dan sesudah event.
-
-### 5. Memakai AI Investigator
-
-1. Buka menu **Penyidik AI**.
-2. Ajukan pertanyaan, misalnya `Apa yang terjadi pada case ini?`.
-3. Periksa badge claim dan confidence.
-4. Klik setiap evidence citation untuk membuka raw log.
-5. Baca limitations dan evidence tambahan yang disarankan untuk inference/hypothesis.
-
-AI bukan pengganti verifikasi investigator. Citation valid membuktikan bahwa evidence ada pada case, sedangkan kebenaran interpretasi tetap harus ditinjau manusia.
-
-### 6. Mengekspor laporan
-
-1. Buka **Temuan & Laporan**.
-2. Tinjau risk breakdown dan evidence IDs.
-3. Jika terdapat `parsed_with_warnings`, centang acknowledgement.
-4. Pilih export Markdown atau **Unduh PDF Investigasi**.
-
-Backend memverifikasi ulang hash evidence sebelum export. Export diblokir apabila integrity mismatch ditemukan.
-
-PDF memuat ringkasan case, rundown maksimal 100 event, temuan rule-based, risk heuristik, evidence ID,
-manifest SHA-256, status integritas, serta versi parser, prompt, tool, dan model.
-
-### Menjalankan evaluation harness
-
-Harness offline tidak membutuhkan token atau koneksi provider:
-
-```powershell
-cd backend
-python evals\run_eval.py --output eval-results.json
-```
-
-Perintah keluar dengan kode `1` apabila pass rate berada di bawah quality gate. Untuk mengubah gate:
-
-```powershell
-python evals\run_eval.py --min-pass-rate 0.90
-```
-
-Evaluasi live terhadap agent dan case nyata membutuhkan `GITHUB_MODELS_TOKEN` serta database aplikasi aktif:
-
-```powershell
-python evals\run_eval.py --live-case UUID-CASE --output live-eval-results.json
-```
-
-Mode live mengukur evidence grounding, pemeriksaan overclaim dasar, jumlah claim, latency, putaran agent,
-dan tool calls. Golden cases dapat ditambah di `backend/evals/golden_cases.json`.
-
-## Konfigurasi GitHub Models
-
-Aplikasi memakai GitHub Models API, bukan endpoint internal GitHub Copilot.
-
-```env
-GITHUB_MODELS_TOKEN=replace-with-a-github-models-token
-GITHUB_MODELS_ENDPOINT=https://models.github.ai/inference
+BOOTSTRAP_ADMIN_PASSWORD=replace-with-a-long-random-password
+GITHUB_MODELS_TOKEN=your-github-models-token
 GITHUB_MODELS_MODEL=openai/gpt-4.1-mini
 ```
 
-Model harus mendukung tool/function calling dan structured JSON response yang dipakai agent. Mengganti model tanpa regression test dapat mengubah kualitas pemilihan tool dan format claim.
+Never commit `.env`. It is excluded by `.gitignore`.
 
-Setelah mengubah konfigurasi:
+### 2. Start the stack
 
-```powershell
-docker compose up -d --force-recreate backend worker scheduler
+```bash
+docker compose up -d --build
+docker compose ps
 ```
 
-Periksa bahwa token masuk tanpa menampilkan nilainya:
+Open:
 
-```powershell
-docker compose exec backend python -c "from app.config import Settings; print('Token aktif:', bool(Settings().github_models_token))"
+- Frontend: http://localhost:3001
+- Backend API: http://localhost:8002
+- API documentation: http://localhost:8002/docs
+- Health: http://localhost:8002/health
+- Readiness: http://localhost:8002/ready
+
+Follow service logs with:
+
+```bash
+docker compose logs -f backend worker frontend
 ```
 
-Konfigurasi proteksi provider:
+Stop without deleting data:
 
-```env
-ALLOW_RAW_LOG_TO_EXTERNAL_PROVIDER=false
-LLM_MAX_TOOL_ROUNDS=8
-LLM_MAX_TOOL_CALLS=20
-LLM_MAX_SAME_TOOL_REPETITION=2
-LLM_NO_PROGRESS_LIMIT=2
-LLM_TIMEOUT_SECONDS=60
-LLM_MAX_TOOL_RESULT_CHARACTERS=20000
+```bash
+docker compose down
 ```
 
-Secara default, raw log tidak dikirim ke provider eksternal. Structured event yang dibutuhkan agent tetap diperlakukan sebagai untrusted data dan mengalami secret redaction.
+Do not use `docker compose down -v` unless permanent removal of the local database and evidence volumes is intended.
 
-## Pipeline ingestion dan analisis
+## Investigation workflow
+
+1. Sign in using the bootstrap account configured in `.env`.
+2. Create a case from the home page.
+3. Upload one or more supported log files.
+4. Select parsing mode:
+   - `strict`: reject the file when malformed records are encountered.
+   - `quarantine`: preserve malformed lines separately while processing valid events.
+5. Monitor parsing and analysis status.
+6. Review dashboard summaries, findings, timeline, and event details.
+7. Ask the AI investigator focused questions.
+8. Verify every claim through its evidence citation.
+9. Review limitations and required additional evidence.
+10. Export the formal report.
+
+Example questions:
+
+```text
+What happened in this case?
+Which source IPs generated repeated authentication failures?
+Build a concise incident timeline and cite the supporting evidence.
+Which findings require immediate analyst review?
+What additional telemetry is needed to confirm the leading hypothesis?
+```
+
+## Deterministic analysis pipeline
 
 ```text
 Upload
-  -> filename/size/MIME/content validation
-  -> SHA-256 streaming
-  -> evidence UUID storage
-  -> Celery job
-  -> content-based format detection
-  -> deterministic parsing
-  -> canonical event mapping
-  -> timestamp normalization + provenance
-  -> stable timeline ordering
-  -> rule-based correlation
-  -> rule-based findings
-  -> explainable risk score
-  -> audit record
+  -> content validation
+  -> SHA-256 hashing
+  -> format detection
+  -> parser selection
+  -> canonical event normalization
+  -> timestamp provenance
+  -> stable ordering
+  -> entity correlation
+  -> detection rules
+  -> risk scoring
+  -> findings and report data
 ```
 
-Setiap event menyimpan minimal:
+Canonical events preserve the original timestamp, normalized timestamp, timezone assumptions, source identity, entities, raw line number, parser version, confidence, and tags.
 
-- `event_id` sebagai evidence citation ID;
-- `case_id` dan `evidence_file_id`;
-- timestamp original dan normalized;
-- timezone, confidence, assumptions, year source, dan timezone source;
-- source type/name dan host;
-- category, action, outcome, severity;
-- username, IP, session, process, dan filename bila tersedia;
-- `raw_log` dan `raw_line_number`;
-- parser name, parser confidence, dan tags.
+Timeline ordering uses deterministic tie-breakers so identical timestamps produce reproducible output.
 
-### Stable timeline ordering
+## AI investigator and claim verification
 
-Timeline diurutkan menggunakan:
+The LLM does not query the database directly. It can only call registered, read-only tools scoped to the active case.
 
-```text
-timestamp_normalized ASC
-timestamp_confidence DESC
-evidence_file_id ASC
-raw_line_number ASC
-event_id ASC
-```
-
-Dengan demikian, timestamp identik tetap menghasilkan urutan yang reproducible.
-
-### Correlation
-
-Correlation memakai shared entity dalam window waktu konfigurabel:
-
-```env
-CORRELATION_WINDOW_MINUTES=10
-```
-
-Contoh alasan yang disimpan:
-
-```text
-shared source_ip within 10 minutes
-```
-
-Session diberi namespace berdasarkan host dan source type agar identifier generik dari sistem berbeda tidak langsung digabungkan.
-
-### Risk scoring
-
-Formula deterministik:
-
-```text
-risk_score =
-  severity_weight * 0.30
-  + frequency_score * 0.20
-  + privilege_weight * 0.25
-  + correlation_count * 0.15
-  + novelty_score * 0.10
-```
-
-Hasil dinormalisasi 0–1. Breakdown menyimpan value, weight, contribution, cap, risk version, threshold version, dan risk level.
-
-## AI Investigator dan claim verification
-
-Agent hanya dapat memakai tool berikut:
-
-1. `search_events(case_id, filters)`
-2. `get_surrounding_events(event_id, window)`
-3. `build_timeline(case_id)`
-4. `correlate_entities(case_id, entity)`
-5. `get_raw_evidence(event_id)`
-6. `generate_case_summary(case_id)`
-
-Tool registry mengunci akses ke case dari URL aktif. Tool call yang mencoba mengambil case lain ditolak.
-
-Respons agent berbentuk:
+Expected model output is structured:
 
 ```json
 {
-  "answer": "Narasi yang dibangun ulang dari claim valid.",
+  "answer": "A response reconstructed from verified claims.",
   "claims": [
     {
-      "claim_id": "claim-1",
-      "text": "Terjadi beberapa kegagalan autentikasi dari IP yang sama.",
-      "status": "inference",
-      "evidence_id": "EVENT_UUID",
-      "supporting_evidence_ids": ["EVENT_UUID_1", "EVENT_UUID_2"],
+      "claim_id": "claim-001",
+      "text": "Repeated failed authentication events targeted the root account.",
+      "status": "fact",
+      "supporting_evidence_ids": ["event-uuid"],
       "contradicting_evidence_ids": [],
-      "entities": {"source_ip": "192.0.2.10"},
-      "confidence": 0.78,
-      "reasoning_summary": "Event gagal terjadi berulang dalam window waktu yang berdekatan.",
-      "limitations": ["Tidak tersedia telemetry endpoint tujuan lainnya."],
+      "entities": {"username": "root"},
+      "confidence": 0.95,
+      "reasoning_summary": null,
+      "limitations": [],
       "required_additional_evidence": []
     }
   ]
 }
 ```
 
-Verification gate memeriksa:
+The backend independently verifies:
 
-- status claim termasuk enum yang diizinkan;
-- evidence UUID benar-benar ada pada case aktif;
-- minimum supporting evidence berdasarkan jenis claim;
-- inference memiliki reasoning dan limitations;
-- hypothesis menyebut limitations dan kebutuhan evidence tambahan;
-- entity, outcome, serta count sederhana konsisten dengan event;
-- claim interpretif berlebihan tidak disamarkan sebagai `fact`.
+- claim status;
+- evidence existence and active-case ownership;
+- minimum support for inferences and hypotheses;
+- required reasoning, limitations, and additional-evidence fields;
+- entity, outcome, and basic count consistency;
+- overclaims involving compromise, attribution, malware, or data theft.
 
-Jika tidak ada claim yang lolos:
+Provider context is bounded. Oversized tool history is compacted and retried automatically when GitHub Models returns HTTP 413.
 
-```text
-Belum cukup bukti untuk menjawab pertanyaan ini.
-```
+## Security controls
 
-## Kontrol keamanan
+- PBKDF2-SHA256 password hashing with per-password salt.
+- Random session tokens stored as hashes.
+- HttpOnly session cookies and CSRF protection.
+- Role and case-membership authorization.
+- Child resources scoped by `case_id`.
+- Upload size, filename, extension, MIME, UTF-8, and content validation.
+- Path traversal and absolute-path rejection.
+- UUID-based evidence filenames.
+- Raw-event ORM guard and PostgreSQL immutability trigger.
+- Secret redaction for PATs, bearer tokens, JWTs, private keys, passwords, and cookies.
+- External raw-log sharing disabled by default.
+- Agent timeout, tool-call budget, repetition guard, and no-progress guard.
+- Audit events for authentication, uploads, agent activity, integrity checks, and exports.
 
-### Authentication dan authorization
+Read [SECURITY.md](SECURITY.md) and [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) before exposing the service outside a trusted development environment.
 
-- password disimpan menggunakan PBKDF2-SHA256 dengan salt;
-- session token acak disimpan sebagai hash di database;
-- session browser menggunakan cookie HttpOnly;
-- request mutating dilindungi CSRF double-submit;
-- role: viewer, investigator, reviewer, dan admin;
-- membership dan permission diperiksa per case;
-- query child-resource selalu di-scope dengan `case_id`.
+## Configuration
 
-### Upload
-
-- ukuran maksimum default 50 MiB;
-- allowlist extension dan MIME;
-- validasi isi UTF-8 dan supported format;
-- path traversal dan absolute path ditolak;
-- evidence disimpan menggunakan UUID;
-- SHA-256 dihitung saat streaming;
-- raw event memiliki ORM guard dan PostgreSQL immutability trigger.
-
-### AI boundary
-
-- tools database read-only;
-- active-case binding;
-- raw/tool content dianggap untrusted data;
-- secret redaction untuk PAT, bearer token, JWT, private key, password, token, dan cookie;
-- raw log tidak dikirim ke provider secara default;
-- timeout, tool-call budget, repetition guard, dan no-progress guard;
-- jawaban model tidak ditampilkan sebelum claim verification.
-
-### Audit dan integrity
-
-Audit mencatat antara lain:
-
-- login/logout;
-- pembuatan case;
-- upload diterima atau ditolak;
-- parser/model/prompt/tool schema version;
-- jawaban agent dan evidence IDs;
-- export laporan;
-- integrity verification.
-
-Audit aplikasi belum cryptographically signed atau WORM. Administrator database/host tetap merupakan privileged trust boundary.
-
-## Ringkasan API
-
-Semua endpoint case memerlukan session dan permission yang sesuai. Endpoint `POST` juga memerlukan CSRF token.
-
-| Method | Endpoint | Fungsi |
+| Variable | Default | Purpose |
 |---|---|---|
-| GET | `/health` | Health check |
-| POST | `/auth/login` | Membuat session login |
-| POST | `/auth/logout` | Menghapus session |
-| GET | `/auth/me` | Identitas user aktif |
-| POST | `/cases` | Membuat case |
-| POST | `/cases/{case_id}/logs` | Upload evidence dan enqueue parsing |
-| GET | `/cases/{case_id}/logs` | Daftar evidence |
-| GET | `/cases/{case_id}/logs/{file_id}` | Detail evidence |
-| GET | `/cases/{case_id}/jobs/{job_id}` | Progress parsing job |
-| POST | `/cases/{case_id}/jobs/{job_id}/retry` | Retry failed/stuck job |
-| POST | `/cases/{case_id}/logs/{file_id}/verify` | Verifikasi ulang SHA-256 |
-| GET | `/cases/{case_id}/events` | Event pagination dan filter |
-| GET | `/cases/{case_id}/events/{event_id}` | Event, raw log, before/after context |
-| GET | `/cases/{case_id}/timeline` | Timeline dan correlation |
-| GET | `/cases/{case_id}/entities` | Ringkasan IP/user/session |
-| GET | `/cases/{case_id}/findings` | Finding dan risk breakdown |
-| POST | `/cases/{case_id}/chat` | AI Investigator |
-| POST | `/cases/{case_id}/exports` | Export Markdown/PDF request |
+| `BACKEND_PORT` | `8002` | Backend port on the host |
+| `FRONTEND_PORT` | `3001` | Frontend port on the host |
+| `NEXT_PUBLIC_API_URL` | `http://localhost:8002` | Browser-visible API URL |
+| `CORS_ORIGINS` | `http://localhost:3001` | Allowed frontend origins |
+| `SERVER_TIMEZONE` | `Asia/Jakarta` | Fallback timezone for incomplete logs |
+| `GITHUB_MODELS_ENDPOINT` | `https://models.github.ai/inference` | Provider endpoint |
+| `GITHUB_MODELS_MODEL` | `openai/gpt-4.1-mini` | Tool-capable investigation model |
+| `LLM_MAX_TOOL_RESULT_CHARACTERS` | `8000` | Maximum result context per tool |
+| `LLM_MAX_OUTPUT_TOKENS` | `2048` | Normal provider output budget |
+| `ALLOW_RAW_LOG_TO_EXTERNAL_PROVIDER` | `false` | External raw-evidence policy |
 
-Dokumentasi request/response interaktif tersedia di http://localhost:8002/docs.
+See [.env.example](.env.example) for the complete list.
 
-## Konfigurasi environment
+## Validation and testing
 
-| Variable | Default development | Kegunaan |
-|---|---:|---|
-| `BACKEND_PORT` | `8002` | Port API pada host |
-| `FRONTEND_PORT` | `3001` | Port frontend pada host |
-| `NEXT_PUBLIC_API_URL` | `http://localhost:8002` | URL API dari browser |
-| `CORS_ORIGINS` | `http://localhost:3001` | Origin frontend yang diizinkan |
-| `SERVER_TIMEZONE` | `Asia/Jakarta` | Asumsi timezone bila log tidak memilikinya |
-| `MAX_UPLOAD_BYTES` | `52428800` | Batas upload dalam byte |
-| `UPLOAD_RATE_LIMIT` | `10` | Upload per window per IP |
-| `CHAT_RATE_LIMIT` | `20` | Chat per window per IP |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Window rate limit |
-| `CORRELATION_WINDOW_MINUTES` | `10` | Window correlation entity |
-| `BRUTE_FORCE_WINDOW_MINUTES` | `10` | Window brute-force rule |
-| `BRUTE_FORCE_THRESHOLD` | `5` | Minimum kegagalan untuk finding |
-| `SESSION_TTL_HOURS` | `12` | Masa berlaku session |
-| `SECURE_COOKIES` | `false` | Harus `true` ketika memakai HTTPS production |
-| `STUCK_JOB_MINUTES` | `10` | Batas heartbeat parsing job |
-| `INTEGRITY_CHECK_INTERVAL_SECONDS` | `86400` | Interval integrity scheduler |
+Run backend tests:
 
-Lihat [.env.example](.env.example) untuk daftar lengkap.
+```bash
+pytest -q backend/tests
+```
 
-## Menjalankan test
-
-### Dari container
+Run the complete validation script on Windows:
 
 ```powershell
-docker compose exec backend pytest -q
+.\scripts\validate.ps1
 ```
 
-Expected result saat dokumentasi ini diperbarui:
+Run offline evaluation harnesses:
 
-```text
-52 passed
+```bash
+python backend/evals/run_eval.py
+python backend/evals/run_detection_eval.py
 ```
 
-### Secara lokal
+The CI workflow performs security and quality checks for pushes and pull requests.
 
-```powershell
-cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-python -m pytest -q
+## Production baseline
+
+The production Compose file provides a hardened baseline:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-### Build frontend
+Before production use:
 
-```powershell
-cd frontend
-npm ci
-npm run build
-```
+- terminate TLS at a trusted reverse proxy or ingress;
+- use a managed secret store;
+- rotate all bootstrap and provider credentials;
+- restrict network exposure;
+- configure immutable backups and evidence retention;
+- integrate centralized monitoring and alerting;
+- review SLOs and launch gates;
+- perform an independent security assessment;
+- document incident-response ownership.
 
-Test mencakup parser valid/malformed/missing fields, Windows/CloudTrail/Cowrie/logfmt, timeline, correlation, risk dan confidence, detection MITRE, claim verification, insufficient evidence, prompt injection, auth, upload security, path traversal, dan cross-case isolation.
-
-### Benchmark detection
-
-```powershell
-cd backend
-python evals\run_detection_eval.py --output detection-eval-results.json
-```
-
-Benchmark melaporkan true positive, false positive, false negative, precision, recall, dan F1. Dataset bawaan adalah golden set internal terkontrol dan tidak boleh diperlakukan sebagai bukti performa pada seluruh lingkungan produksi.
-
-## Operasional Docker
-
-Restart satu service:
-
-```powershell
-docker compose restart backend
-docker compose restart frontend
-```
-
-Rebuild setelah perubahan kode:
-
-```powershell
-docker compose up -d --build
-```
-
-Melihat penggunaan resource:
-
-```powershell
-docker stats
-```
-
-Masuk ke shell backend:
-
-```powershell
-docker compose exec backend sh
-```
-
-Melihat revision database:
-
-```powershell
-docker compose exec backend alembic current
-```
+See [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md), [docs/SLO.md](docs/SLO.md), and [docs/runbooks/API_DEGRADATION.md](docs/runbooks/API_DEGRADATION.md).
 
 ## Troubleshooting
 
-### Halaman hanya berwarna gelap atau kosong
+### `Failed to fetch`
 
-1. Pastikan frontend aktif: `docker compose ps`.
-2. Lakukan hard refresh `Ctrl+Shift+R`.
-3. Periksa `docker compose logs --tail 100 frontend`.
-4. Pastikan membuka `http://localhost:3001`, bukan port backend.
-
-### Halaman login reload terus
-
-Versi terbaru sudah mencegah redirect loop `/auth/me` 401 pada halaman login. Rebuild frontend dan bersihkan cache:
+Verify backend readiness and frontend API configuration:
 
 ```powershell
-docker compose up -d --build frontend
+Invoke-RestMethod http://localhost:8002/ready
+docker compose ps
+docker compose logs --tail 100 backend frontend
 ```
 
-Kemudian tekan `Ctrl+Shift+R`.
+Rebuild if the browser still references an outdated API URL:
 
-### Login gagal
-
-- cek `BOOTSTRAP_ADMIN_USERNAME` dan `BOOTSTRAP_ADMIN_PASSWORD` di `.env`;
-- ingat bahwa mengganti `.env` tidak mengubah password user yang sudah tersimpan;
-- lihat log: `docker compose logs --tail 100 backend`.
-
-### `GitHub Models API request failed`
-
-- pastikan `GITHUB_MODELS_TOKEN` aktif dan belum expired/revoked;
-- pastikan model ID benar;
-- pastikan akun/token mempunyai akses GitHub Models;
-- cek koneksi internet container;
-- lihat error backend tanpa membagikan token.
-
-```powershell
-docker compose logs --tail 100 backend
+```bash
+docker compose up -d --build --force-recreate backend frontend
 ```
 
-### Upload berhenti di queued
+Then refresh the browser with `Ctrl+F5`.
 
-```powershell
-docker compose ps worker redis
-docker compose logs --tail 100 worker redis
+### GitHub Models authentication error
+
+- Confirm the token is active and permitted to use GitHub Models.
+- Confirm `GITHUB_MODELS_MODEL` names a tool/function-calling model.
+- Recreate the backend after changing `.env`:
+
+```bash
+docker compose up -d --force-recreate backend worker
 ```
 
-Pastikan worker dan Redis aktif. Job failed/stuck dapat di-retry melalui endpoint/UI yang tersedia.
+Never print or commit the token while troubleshooting.
 
-### Port sudah digunakan
+### Parsing job remains queued
 
-Ubah `.env`:
-
-```env
-BACKEND_PORT=8012
-FRONTEND_PORT=3011
-NEXT_PUBLIC_API_URL=http://localhost:8012
-CORS_ORIGINS=http://localhost:3011
+```bash
+docker compose ps redis worker
+docker compose logs --tail 200 worker redis
 ```
 
-Kemudian rebuild frontend dan backend.
+### Reset local development data
 
-### Reset total development
+The following command permanently deletes the local database and evidence volumes:
 
-Peringatan: perintah berikut menghapus database dan evidence volume lokal secara permanen.
-
-```powershell
+```bash
 docker compose down -v
-docker compose up -d --build
 ```
 
-Gunakan hanya jika seluruh data development boleh dibuang.
+Use it only when all local development data may be discarded.
 
-## Menambah parser baru
+## Known limitations
 
-Menambah format parser adalah perubahan eksplisit terhadap scope dan harus disetujui terlebih dahulu.
+- TraceLens is not a SIEM and does not provide native real-time ingestion.
+- Native EVTX, PCAP, compressed archives, and external threat-intelligence enrichment are not included.
+- MFA, SSO, self-service password recovery, and full identity lifecycle management are not yet implemented.
+- Evidence storage and database audit records are not WORM or cryptographically signed.
+- TLS termination, malware scanning, immutable object storage, and external secret management require deployment integration.
+- PDF timelines are intentionally bounded to control report size and generation time.
+- Risk scoring is heuristic and has not been calibrated against every production environment.
+- Valid evidence citations prove traceability, not the absolute correctness of an interpretation.
 
-Secara umum:
+Do not use TraceLens as the sole basis for legal conclusions, attacker attribution, or high-impact incident response without qualified human validation.
 
-1. tambah deteksi format berbasis konten;
-2. implementasikan parser deterministik tanpa LLM;
-3. map ke `ParsedEvent` dan schema kanonik;
-4. simpan raw line tanpa modifikasi;
-5. tetapkan parser name/version dan confidence;
-6. tambahkan test valid, missing field, malformed, dan detection ambiguity;
-7. dokumentasikan timestamp serta timezone assumptions.
+## Documentation
 
-Panduan lengkap: [docs/ADDING_A_PARSER.md](docs/ADDING_A_PARSER.md).
+- [Architecture](ARCHITECTURE.md)
+- [Security policy](SECURITY.md)
+- [Contribution guide](CONTRIBUTING.md)
+- [Parser development](docs/ADDING_A_PARSER.md)
+- [Threat model](docs/THREAT_MODEL.md)
+- [Production readiness](docs/PRODUCTION_READINESS.md)
+- [Build validation report](docs/BUILD_VALIDATION_REPORT.md)
+- [Implementation report](docs/IMPLEMENTATION_REPORT.md)
 
-## Batasan MVP
+## Contributing
 
-- bukan SIEM dan belum menerima real-time ingestion;
-- belum mendukung Windows EVTX, PCAP, cloud audit, container log, atau threat intelligence eksternal;
-- rate limit masih per-IP, bukan per-user;
-- lifecycle user belum lengkap: belum ada UI password rotation/recovery, MFA, atau SSO;
-- claim verifier melakukan pemeriksaan semantik deterministik terbatas, bukan formal proof;
-- investigator tetap wajib memeriksa raw evidence;
-- filesystem evidence dan audit database belum WORM atau cryptographically signed;
-- belum ada TLS termination, external secret manager, antivirus scanning, dan object storage immutable;
-- PDF dibatasi pada 100 event timeline per laporan agar ukuran dan waktu generasi tetap terkendali;
-- risk formula bersifat heuristic dan belum dikalibrasi menggunakan corpus insiden berlabel;
-- CSV multiline quoted record belum didukung.
+Contributions are welcome. Review [CONTRIBUTING.md](CONTRIBUTING.md), add tests for behavioral changes, and preserve evidence traceability and case isolation.
 
-Jangan gunakan MVP ini sebagai satu-satunya dasar keputusan hukum, atribusi attacker, atau respons insiden berisiko tinggi tanpa validasi investigator manusia.
+## License
 
-## Dokumentasi lanjutan
-
-- [Arsitektur dan gap analysis](docs/ARCHITECTURE.md)
-- [Threat model MVP](docs/THREAT_MODEL.md)
-- [Status improvement implementation](docs/IMPROVEMENT_IMPLEMENTATION_STATUS.md)
-- [Panduan menambah parser](docs/ADDING_A_PARSER.md)
-- [Cakupan ide produk dan roadmap](docs/PRODUCT_SCOPE_IDEAS.md)
-
-## Status verifikasi
-
-Pada validasi terakhir:
-
-- Docker Compose menjalankan PostgreSQL, Redis, FastAPI, Next.js, Celery worker, dan Celery Beat;
-- Alembic migration berhasil dijalankan saat backend startup;
-- backend test suite: **44 passed**;
-- Next.js production build berhasil;
-- endpoint API dan halaman login merespons HTTP 200;
-- akses case tanpa session ditolak dengan HTTP 401.
-
----
-
-TraceLens AI adalah alat bantu investigasi. Nilai utamanya bukan sekadar menghasilkan narasi AI, melainkan menjaga agar setiap narasi dapat diperiksa kembali terhadap evidence asli.
+No open-source license has been declared yet. Unless a license is added, all rights remain with the repository owner.
