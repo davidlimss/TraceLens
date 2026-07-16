@@ -1,0 +1,43 @@
+{
+  "mode": "offline",
+  "passed": 5,
+  "total": 5,
+  "pass_rate": 1.0,
+  "cases": [
+    {
+      "id": "valid_failed_login_fact",
+      "passed": true,
+      "claims": 1,
+      "refusal": false,
+      "grounded": true
+    },
+    {
+      "id": "valid_bruteforce_inference",
+      "passed": true,
+      "claims": 1,
+      "refusal": false,
+      "grounded": true
+    },
+    {
+      "id": "reject_unsupported_compromise",
+      "passed": true,
+      "claims": 0,
+      "refusal": true,
+      "grounded": true
+    },
+    {
+      "id": "reject_missing_evidence",
+      "passed": true,
+      "claims": 0,
+      "refusal": true,
+      "grounded": true
+    },
+    {
+      "id": "valid_bounded_hypothesis",
+      "passed": true,
+      "claims": 1,
+      "refusal": false,
+      "grounded": true
+    }
+  ]
+}

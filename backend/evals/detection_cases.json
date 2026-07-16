@@ -1,0 +1,27 @@
+[
+  {"id":"brute_force","expected":["brute_force"],"events":[
+    {"action":"login","outcome":"failure","ip":"192.0.2.10","user":"root"},
+    {"action":"login","outcome":"failure","ip":"192.0.2.10","user":"root"},
+    {"action":"login","outcome":"failure","ip":"192.0.2.10","user":"root"},
+    {"action":"login","outcome":"failure","ip":"192.0.2.10","user":"root"},
+    {"action":"login","outcome":"failure","ip":"192.0.2.10","user":"root"}]},
+  {"id":"password_spray","expected":["brute_force","password_spraying"],"events":[
+    {"action":"login","outcome":"failure","ip":"198.51.100.10","user":"u1"},
+    {"action":"login","outcome":"failure","ip":"198.51.100.10","user":"u2"},
+    {"action":"login","outcome":"failure","ip":"198.51.100.10","user":"u3"},
+    {"action":"login","outcome":"failure","ip":"198.51.100.10","user":"u4"},
+    {"action":"login","outcome":"failure","ip":"198.51.100.10","user":"u5"}]},
+  {"id":"distributed","expected":["distributed_password_guessing"],"events":[
+    {"action":"login","outcome":"failure","ip":"203.0.113.1","user":"admin"},
+    {"action":"login","outcome":"failure","ip":"203.0.113.2","user":"admin"},
+    {"action":"login","outcome":"failure","ip":"203.0.113.3","user":"admin"},
+    {"action":"login","outcome":"failure","ip":"203.0.113.4","user":"admin"},
+    {"action":"login","outcome":"failure","ip":"203.0.113.5","user":"admin"}]},
+  {"id":"powershell","expected":["suspicious_powershell"],"events":[
+    {"action":"process_create","category":"process","command_line":"powershell.exe -EncodedCommand SQBFAFgA"}]},
+  {"id":"web_exploit","expected":["web_exploitation"],"events":[
+    {"action":"get","category":"web","url_path":"/../../etc/passwd","ip":"192.0.2.44"}]},
+  {"id":"benign","expected":[],"events":[
+    {"action":"login","outcome":"failure","ip":"192.0.2.30","user":"alice"},
+    {"action":"message","category":"application"}]}
+]

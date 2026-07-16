@@ -1,0 +1,3 @@
+timestamp,level,message,user,ip,action,outcome,session
+2026-07-14T10:00:01+07:00,warning,Login failed,admin,192.168.1.50,login,failure,sess-101
+2026-07-14T10:00:05+07:00,info,Login successful,admin,192.168.1.50,login,success,sess-101

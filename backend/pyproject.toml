@@ -1,0 +1,7 @@
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = [
+  "ignore:The configuration option .* is unset:pytest.PytestDeprecationWarning",
+]

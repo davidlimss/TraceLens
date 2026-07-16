@@ -1,0 +1,12 @@
+groups:
+  - name: tracelens-slo
+    rules:
+      - record: tracelens:http_error_ratio:5m
+        expr: sum(rate(tracelens_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum(rate(tracelens_http_requests_total[5m])), 0.001)
+      - alert: TraceLensFastErrorBudgetBurn
+        expr: tracelens:http_error_ratio:5m > 0.0144
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "TraceLens API burns the 99.9% availability budget rapidly"
+          runbook: "docs/runbooks/API_DEGRADATION.md"

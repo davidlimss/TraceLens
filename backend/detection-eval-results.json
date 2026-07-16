@@ -1,0 +1,68 @@
+{
+  "true_positive": 6,
+  "false_positive": 0,
+  "false_negative": 0,
+  "precision": 1.0,
+  "recall": 1.0,
+  "f1": 1.0,
+  "cases": [
+    {
+      "id": "brute_force",
+      "expected": [
+        "brute_force"
+      ],
+      "actual": [
+        "brute_force"
+      ],
+      "passed": true
+    },
+    {
+      "id": "password_spray",
+      "expected": [
+        "brute_force",
+        "password_spraying"
+      ],
+      "actual": [
+        "brute_force",
+        "password_spraying"
+      ],
+      "passed": true
+    },
+    {
+      "id": "distributed",
+      "expected": [
+        "distributed_password_guessing"
+      ],
+      "actual": [
+        "distributed_password_guessing"
+      ],
+      "passed": true
+    },
+    {
+      "id": "powershell",
+      "expected": [
+        "suspicious_powershell"
+      ],
+      "actual": [
+        "suspicious_powershell"
+      ],
+      "passed": true
+    },
+    {
+      "id": "web_exploit",
+      "expected": [
+        "web_exploitation"
+      ],
+      "actual": [
+        "web_exploitation"
+      ],
+      "passed": true
+    },
+    {
+      "id": "benign",
+      "expected": [],
+      "actual": [],
+      "passed": true
+    }
+  ]
+}

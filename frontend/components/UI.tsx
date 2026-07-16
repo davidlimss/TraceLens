@@ -1,0 +1,9 @@
+"use client";
+import {useEffect} from "react";
+import type {EventItem,Severity} from "@/lib/types";
+export function SeverityBadge({severity}: {severity:Severity}){const normalized=(severity||"info").toLowerCase();return <span className={`badge severity-${normalized}`}>{normalized}</span>}
+export function Loading({label="Memuat data investigasi…"}:{label?:string}){return <div className="loading" role="status">{label}</div>}
+export function ErrorState({error}:{error:string}){return <div className="error" role="alert">{error}</div>}
+export function Empty({label}:{label:string}){return <div className="empty">{label}</div>}
+export function RawLog({event,compact=false}:{event:EventItem;compact?:boolean}){return <div><div className="event-meta"><span>evidence_id: {event.event_id}</span><span>line: {event.raw_line_number}</span><span>parser: {event.parser_name}</span></div><pre className="raw" style={compact?{marginTop:8}:{marginTop:14}}>{event.raw_log}</pre>{event.timestamp_assumptions?.length>0&&<div className="notice" style={{marginTop:10}}>Asumsi timestamp: {event.timestamp_assumptions.join(" · ")} ({Math.round(event.timestamp_confidence*100)}% confidence)</div>}</div>}
+export function EvidenceModal({event,onClose}:{event:EventItem;onClose:()=>void}){useEffect(()=>{const close=(keyboardEvent:KeyboardEvent)=>keyboardEvent.key==="Escape"&&onClose();window.addEventListener("keydown",close);return()=>window.removeEventListener("keydown",close)},[onClose]);return <div className="evidence-modal" role="presentation" onMouseDown={e=>e.target===e.currentTarget&&onClose()}><div className="evidence-dialog" role="dialog" aria-modal="true" aria-label="Bukti log mentah"><div className="section-head"><div><SeverityBadge severity={event.severity}/> <strong style={{marginLeft:8}}>{event.event_action}</strong></div><button className="btn" onClick={onClose} aria-label="Tutup bukti" autoFocus>Tutup ×</button></div><RawLog event={event}/></div></div>}

@@ -1,0 +1,116 @@
+x-backend-environment: &backend-environment
+  DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://loginvestigator:change-me@postgres:5432/loginvestigator}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  EVIDENCE_STORAGE_PATH: ${EVIDENCE_STORAGE_PATH:-/app/storage/evidence}
+  CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+  SERVER_TIMEZONE: ${SERVER_TIMEZONE:-Asia/Jakarta}
+  CORRELATION_WINDOW_MINUTES: ${CORRELATION_WINDOW_MINUTES:-10}
+  BRUTE_FORCE_WINDOW_MINUTES: ${BRUTE_FORCE_WINDOW_MINUTES:-10}
+  BRUTE_FORCE_THRESHOLD: ${BRUTE_FORCE_THRESHOLD:-5}
+  GITHUB_MODELS_TOKEN: ${GITHUB_MODELS_TOKEN:-}
+  GITHUB_MODELS_ENDPOINT: ${GITHUB_MODELS_ENDPOINT:-https://models.github.ai/inference}
+  GITHUB_MODELS_MODEL: ${GITHUB_MODELS_MODEL:-openai/gpt-4.1-mini}
+  LLM_MAX_TOOL_ROUNDS: ${LLM_MAX_TOOL_ROUNDS:-8}
+  LLM_MAX_TOOL_CALLS: ${LLM_MAX_TOOL_CALLS:-20}
+  MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-52428800}
+  UPLOAD_RATE_LIMIT: ${UPLOAD_RATE_LIMIT:-10}
+  CHAT_RATE_LIMIT: ${CHAT_RATE_LIMIT:-20}
+  RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+  BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+  BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-change-me-local}
+  SESSION_TTL_HOURS: ${SESSION_TTL_HOURS:-12}
+  SECURE_COOKIES: ${SECURE_COOKIES:-false}
+  LLM_MAX_SAME_TOOL_REPETITION: ${LLM_MAX_SAME_TOOL_REPETITION:-2}
+  LLM_NO_PROGRESS_LIMIT: ${LLM_NO_PROGRESS_LIMIT:-2}
+  LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
+  LLM_MAX_TOOL_RESULT_CHARACTERS: ${LLM_MAX_TOOL_RESULT_CHARACTERS:-8000}
+  LLM_MAX_OUTPUT_TOKENS: ${LLM_MAX_OUTPUT_TOKENS:-2048}
+  ALLOW_RAW_LOG_TO_EXTERNAL_PROVIDER: ${ALLOW_RAW_LOG_TO_EXTERNAL_PROVIDER:-false}
+  STUCK_JOB_MINUTES: ${STUCK_JOB_MINUTES:-10}
+  INTEGRITY_CHECK_INTERVAL_SECONDS: ${INTEGRITY_CHECK_INTERVAL_SECONDS:-86400}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-loginvestigator}
+      POSTGRES_USER: ${POSTGRES_USER:-loginvestigator}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  evidence-init:
+    build: ./backend
+    user: "0:0"
+    command: ["sh", "-c", "chown -R 10001:10001 /app/storage/evidence"]
+    volumes:
+      - evidence_data:/app/storage/evidence
+
+  backend:
+    build: ./backend
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment: *backend-environment
+    ports:
+      - "${BACKEND_PORT:-8002}:8000"
+    volumes:
+      - evidence_data:/app/storage/evidence
+    depends_on:
+      evidence-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=4
+    environment: *backend-environment
+    volumes:
+      - evidence_data:/app/storage/evidence
+    depends_on:
+      evidence-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  scheduler:
+    build: ./backend
+    command: celery -A app.worker.celery_app beat --loglevel=info
+    environment: *backend-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    ports:
+      - "${FRONTEND_PORT:-3001}:3000"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
+  evidence_data:

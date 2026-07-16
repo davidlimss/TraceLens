@@ -1,0 +1,40 @@
+[
+  {
+    "id": "valid_failed_login_fact",
+    "events": [{"outcome": "failure", "action": "login", "source_ip": "192.0.2.10"}],
+    "draft": {"claims": [{"text": "Login gagal tercatat.", "status": "fact", "evidence_refs": [0]}]},
+    "expected_claims": 1,
+    "expected_refusal": false
+  },
+  {
+    "id": "valid_bruteforce_inference",
+    "events": [
+      {"outcome": "failure", "action": "login", "source_ip": "192.0.2.20"},
+      {"outcome": "failure", "action": "login", "source_ip": "192.0.2.20"}
+    ],
+    "draft": {"claims": [{"text": "Rangkaian login gagal konsisten dengan percobaan brute force.", "status": "inference", "evidence_refs": [0,1], "reasoning_summary": "Kegagalan login berulang dari IP yang sama.", "limitations": ["Belum membuktikan identitas atau niat pelaku."]}]},
+    "expected_claims": 1,
+    "expected_refusal": false
+  },
+  {
+    "id": "reject_unsupported_compromise",
+    "events": [{"outcome": "failure", "action": "login", "source_ip": "192.0.2.30"}],
+    "draft": {"claims": [{"text": "Server telah diretas oleh penyerang.", "status": "fact", "evidence_refs": [0]}]},
+    "expected_claims": 0,
+    "expected_refusal": true
+  },
+  {
+    "id": "reject_missing_evidence",
+    "events": [],
+    "draft": {"claims": [{"text": "Login berhasil tercatat.", "status": "fact", "evidence_refs": [99]}]},
+    "expected_claims": 0,
+    "expected_refusal": true
+  },
+  {
+    "id": "valid_bounded_hypothesis",
+    "events": [{"outcome": "success", "action": "login", "source_ip": "198.51.100.8"}],
+    "draft": {"claims": [{"text": "Login ini dapat menjadi bagian dari aktivitas tidak sah.", "status": "hypothesis", "evidence_refs": [0], "confidence": 0.55, "limitations": ["Kepemilikan IP belum diketahui."], "required_additional_evidence": ["Log endpoint dan konfirmasi pemilik akun."]}]},
+    "expected_claims": 1,
+    "expected_refusal": false
+  }
+]
