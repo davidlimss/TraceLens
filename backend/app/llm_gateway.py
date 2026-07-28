@@ -111,6 +111,7 @@ class LLMGateway:
                 headers={
                     "Authorization": f"Bearer {settings.github_models_token}",
                     "Accept": "application/vnd.github+json",
+                    "X-GitHub-Api-Version": "2026-03-10",
                     "Content-Type": "application/json",
                 },
                 timeout=30.0,
