@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.models import Correlation, Event, Finding
 
-TIMELINE_SORT_VERSION = "timeline-v1.1"
+TIMELINE_SORT_VERSION = "timeline-v1.2"
 RISK_VERSION = "risk-v1.1"
 RISK_THRESHOLD_VERSION = "threshold-v1"
 CORRELATION_CAP = 20
@@ -64,8 +64,9 @@ def timeline_sort_key(event: Event) -> tuple:
         event.timestamp_normalized is None,
         event.timestamp_normalized,
         -(event.timestamp_confidence or 0.0),
-        str(event.evidence_file_id),
-        event.raw_line_number,
+        str(event.evidence_file_id or event.external_evidence_id or ""),
+        event.raw_line_number is None,
+        event.raw_line_number if event.raw_line_number is not None else 0,
         str(event.event_id),
     )
 
@@ -74,8 +75,9 @@ def timeline_order_by() -> tuple:
     return (
         Event.timestamp_normalized.asc().nullslast(),
         Event.timestamp_confidence.desc(),
-        Event.evidence_file_id.asc(),
-        Event.raw_line_number.asc(),
+        Event.evidence_file_id.asc().nullslast(),
+        Event.external_evidence_id.asc().nullslast(),
+        Event.raw_line_number.asc().nullslast(),
         Event.event_id.asc(),
     )
 
@@ -120,6 +122,7 @@ def build_correlations(events: Iterable[Event], window_minutes: int) -> list[Cor
             if value and event.timestamp_normalized:
                 grouped[(entity_type, value)].append(event)
     correlations: list[Correlation] = []
+    seen_pairs: set[tuple[object, object, str]] = set()
     for (entity_type, value), related in grouped.items():
         ordered = sorted(related, key=timeline_sort_key)
         # Linking each event to its nearest predecessor preserves an explicit
@@ -127,6 +130,14 @@ def build_correlations(events: Iterable[Event], window_minutes: int) -> list[Cor
         for previous, event in zip(ordered, ordered[1:]):
             delta = event.timestamp_normalized - previous.timestamp_normalized
             if delta <= window:
+                pair_key = (previous.event_id, event.event_id, entity_type)
+                # Duplicate event rows can occur when multiple ingestion jobs
+                # are retried or a case is rebuilt concurrently.  Keep the
+                # correlation deterministic and compatible with the database
+                # uniqueness constraint instead of emitting duplicate inserts.
+                if pair_key in seen_pairs:
+                    continue
+                seen_pairs.add(pair_key)
                 minutes = round(delta.total_seconds() / 60, 2)
                 correlations.append(Correlation(
                     case_id=event.case_id, event_id=previous.event_id, related_event_id=event.event_id,

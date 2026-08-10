@@ -9,9 +9,9 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from app.agent_tools import ToolRegistry
+from app.agent_tools import ToolRegistry, search_disconfirming_evidence
 from app.auth import hash_password, require_case_permission, verify_password
-from app.main import (build_formal_pdf_report, export_report, finding_recommendations,
+from app.main import (build_formal_pdf_report, build_markdown_report, export_report, finding_recommendations,
                       get_event_context, get_log_status)
 from app.models import AuditLog, Base, Case, CaseMembership, Event, EvidenceFile, User
 from app.schemas import ReportExportRequest
@@ -124,6 +124,22 @@ def test_cross_case_event_evidence_and_agent_tool_access_are_denied(db):
         ToolRegistry(db, case_a.case_id).execute("get_raw_evidence", {"event_id": str(event_b.event_id)})
 
 
+def test_disconfirming_search_returns_benign_candidate_only_from_active_case(db):
+    case = add_case(db, "maintenance")
+    evidence = add_evidence(db, case)
+    event = add_event(db, case, evidence)
+    event.event_action = "maintenance"
+    db.commit()
+
+    result = search_disconfirming_evidence(
+        db, case.case_id,
+        {"hypothesis_id": "H-001", "entities": {"source_ip": "192.0.2.1"}},
+    )
+    assert result["search_purpose"] == "disconfirming_evidence"
+    assert result["candidate_count"] == 1
+    assert result["events"][0]["evidence_id"] == str(event.event_id)
+
+
 def test_export_is_case_scoped_and_audited(db):
     case_a, case_b = add_case(db, "A"), add_case(db, "B")
     add_evidence(db, case_b)
@@ -136,6 +152,46 @@ def test_export_is_case_scoped_and_audited(db):
                                              AuditLog.action == "report_export_generated"))
     assert audit is not None
     assert audit.details["finding_count"] == 0
+
+
+def test_markdown_report_includes_vigil_hypothesis_evidence_and_rejection_reason():
+    case_id = uuid.uuid4()
+    report = build_markdown_report(
+        case_id,
+        [],
+        [],
+        case_name="VIGIL report",
+        investigation={
+            "agent_run_id": "run-001",
+            "question": "Investigate authentication activity",
+            "status": "completed",
+            "stop_reason": "VERIFICATION_FAILED",
+            "plan": {"steps": [{"status": "completed", "objective": "Review timeline"}]},
+            "hypotheses": [{
+                "hypothesis_id": "H-001",
+                "status": "weakened",
+                "statement": "Activity may be password guessing",
+                "supporting_evidence_ids": ["evidence-a"],
+                "contradicting_evidence_ids": ["evidence-b"],
+                "missing_evidence": ["maintenance ownership"],
+                "alternative_explanations": ["authorized maintenance"],
+            }],
+            "evidence_gaps": [{"priority": "high", "description": "Need maintenance ticket"}],
+            "verification_summary": {
+                "verified_count": 0,
+                "rejected_count": 1,
+                "rejection_reasons": [{"reason_code": "INVALID_EVIDENCE", "detail": "Evidence is outside case"}],
+            },
+            "repair_state": {"attempt_count": 1},
+        },
+    )
+    assert "### Hypothesis evidence links" in report
+    assert "Supporting evidence: evidence-a" in report
+    assert "Contradicting evidence: evidence-b" in report
+    assert "Missing evidence: maintenance ownership" in report
+    assert "Alternative explanations: authorized maintenance" in report
+    assert "#### Verification rejection reasons" in report
+    assert "INVALID_EVIDENCE" in report
 
 
 def test_pdf_export_returns_real_pdf_bytes(db):

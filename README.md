@@ -84,8 +84,12 @@ FastAPI backend :8002 ----> PostgreSQL
   +----> Evidence volume
   |      file sumber dan hash immutable
   |
-  +----> GitHub Models
+  +----> Hosted OpenAI-compatible LLM (Groq by default)
          pemilihan tool dan interpretasi evidence
+
+  +----> External Evidence Plane (read-only)
+         OpenSearch / Splunk / Wazuh Indexer
+         -> MCP adapter -> immutable external_evidence snapshot
 ```
 
 | Layer | Teknologi |
@@ -95,7 +99,8 @@ FastAPI backend :8002 ----> PostgreSQL
 | Database | PostgreSQL 16 |
 | Queue | Redis 7, Celery |
 | Scheduler | Celery Beat |
-| LLM provider | GitHub Models |
+| LLM provider | OpenAI-compatible hosted provider; default development configuration is Groq |
+| External telemetry | OpenSearch, Splunk, Wazuh Indexer melalui adapter MCP read-only |
 | Deployment | Docker Compose |
 | Monitoring | Prometheus metrics dan SLO rules |
 
@@ -129,7 +134,7 @@ TraceLens/
 
 - Docker Desktop dengan Docker Compose.
 - Git.
-- Token GitHub Models dengan izin memakai model yang dikonfigurasi.
+- API key provider LLM yang dikonfigurasi (default development: Groq).
 - Minimal 4 GB memory yang tersedia direkomendasikan.
 
 ### 1. Clone dan konfigurasi
@@ -149,13 +154,27 @@ Copy-Item .env.example .env
 Isi `.env` dengan nilai aman:
 
 ```dotenv
+APP_ENV=development
+REQUIRE_MIGRATIONS=true
+SCHEMA_REVISION=0007_vigil_replay_snapshots
 POSTGRES_PASSWORD=ganti-dengan-password-random-panjang
 BOOTSTRAP_ADMIN_USERNAME=admin
 BOOTSTRAP_ADMIN_PASSWORD=ganti-dengan-password-random-panjang
-GITHUB_MODELS_TOKEN=token-github-models-kamu
-GITHUB_MODELS_MODEL=openai/gpt-4.1
+# Hosted LLM provider (Groq free tier untuk development)
+LLM_PROVIDER=groq
+LLM_API_KEY=token-groq-kamu
+LLM_ENDPOINT=https://api.groq.com/openai/v1
+LLM_MODEL=openai/gpt-oss-120b
 LLM_MAX_TOOL_CALLS=20
+LOGIN_RATE_LIMIT=10
 ```
+
+API sekarang menolak melayani deployment production bila schema belum berada
+di revision Alembic yang diwajibkan. Endpoint `/ready` juga memeriksa
+PostgreSQL, Redis, dan evidence storage; status `ready` bukan sekadar proses
+HTTP hidup.
+
+Untuk memakai konektor SIEM eksternal, isi konfigurasi `EXTERNAL_*`, `OPENSEARCH_*`, `SPLUNK_*`, atau `WAZUH_*` di `.env`. Biarkan `EXTERNAL_SOURCES_ENABLED=false` jika belum ada source yang sudah memiliki field `tracelens.case_id`/scope case.
 
 Jangan commit `.env`.
 
@@ -187,6 +206,17 @@ docker compose down
 ```
 
 Jangan gunakan `docker compose down -v` kecuali database dan evidence volume lokal memang ingin dihapus permanen.
+
+Untuk baseline hardening production, gunakan overlay berikut setelah secret,
+TLS/WAF, storage, dan backup sudah disiapkan:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+```
+
+Checklist penerimaan ada di [`docs/PRODUCT_ACCEPTANCE_CHECKLIST_ID.md`](docs/PRODUCT_ACCEPTANCE_CHECKLIST_ID.md),
+sedangkan definisi target 10/10 ada di
+[`docs/PRODUCTIZATION_10_10_ID.md`](docs/PRODUCTIZATION_10_10_ID.md).
 
 ## Alur investigasi
 
@@ -242,10 +272,44 @@ Tool utama:
 - `correlate_entities`
 - `get_raw_evidence`
 - `generate_case_summary`
+- `search_external_events` — query terbatas ke OpenSearch, Splunk, atau Wazuh; hasil di-snapshot dulu sebagai evidence lokal.
+
+Integrasi external telemetry dijelaskan di [docs/EXTERNAL_MCP_INTEGRATION_ID.md](docs/EXTERNAL_MCP_INTEGRATION_ID.md). Jika diaktifkan, external telemetry menjadi source utama agent; upload lokal menjadi fallback/konteks tambahan. Aktifkan hanya jika setiap source memiliki field scope case. TraceLens tidak menerima arbitrary OpenSearch DSL atau SPL dari model dan tidak menyediakan active response.
+
+### Agent run dan external event plane
+
+External snapshot yang lolos scope `case_id` diproyeksikan menjadi canonical `Event` dengan `event_origin=external`. Projection ini dibaca timeline, correlation, detection, dan risk engine; raw payload tetap immutable di `external_evidence` dan tidak ditimpa oleh projection.
+
+Setiap sesi AI memiliki durable run dan checkpoint. Trace model/tool yang sudah direduksi tersimpan di `agent_steps`, sementara evidence yang benar-benar diamati tercatat di `evidence_ledgers`. Run yang gagal karena timeout/provider outage dapat dilanjutkan dari checkpoint:
+
+```text
+GET  /cases/{case_id}/agent-runs
+GET  /cases/{case_id}/agent-runs/{run_id}
+POST /cases/{case_id}/agent-runs/{run_id}/pause
+POST /cases/{case_id}/agent-runs/{run_id}/resume
+POST /cases/{case_id}/agent-runs/{run_id}/cancel
+```
+
+Run tidak menyimpan chain-of-thought tersembunyi. Investigator hanya melihat status, nama tool, jumlah step, evidence ID, dan hasil yang sudah direduksi. Celery Beat menandai run yang kehilangan heartbeat sebagai `failed`, sehingga dapat di-resume tanpa menganggap jawaban parsial sebagai jawaban final.
 
 Backend memverifikasi status claim, keberadaan evidence, kepemilikan case, dukungan minimum inference/hypothesis, entity consistency, count consistency, limitation, dan overclaim.
 
 Jawaban AI dibangun ulang hanya dari claim yang lolos verification gate.
+
+### TraceLens VIGIL
+
+Agent investigator saat ini menggunakan bounded single-agent VIGIL (*Verified
+Investigation Graph & Evidence Loop*). Setiap run menyimpan plan eksplisit,
+hypothesis registry, epistemic state, evidence gap, case-bounded memory,
+provenance, next action, repair attempt, dan structured stop reason di
+`AgentRun.state`. Setelah draft claim ditolak, gateway dapat mencari evidence
+tambahan atau menurunkan claim secara maksimal dua kali; jika tetap gagal,
+respons ditutup dengan insufficient evidence. UI menampilkan trace operasional
+tersebut tanpa chain-of-thought.
+
+VIGIL tetap read-only dan case-scoped. LLM tidak mem-parsing, mengurutkan,
+mengorelasikan, mendeteksi, atau menghitung risk. Investigator manusia tetap
+menjadi pengambil keputusan akhir.
 
 ## Kontrol keamanan
 
@@ -269,16 +333,28 @@ Baca [SECURITY.md](SECURITY.md) dan [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
 
 | Variable | Default | Kegunaan |
 |---|---|---|
+| `APP_VERSION` | `0.2.0-beta.1` | Versi API dan metadata release |
+| `APP_ENV` | `development` | Mode deployment; `production` mengaktifkan hardening wajib |
+| `REQUIRE_MIGRATIONS` | `true` | Menolak startup jika schema belum dimigrasikan |
+| `SCHEMA_REVISION` | `0007_vigil_replay_snapshots` | Alembic revision yang harus aktif |
 | `BACKEND_PORT` | `8002` | Port backend pada host |
 | `FRONTEND_PORT` | `3001` | Port frontend pada host |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8002` | URL API browser |
 | `CORS_ORIGINS` | `http://localhost:3001` | Origin frontend yang diizinkan |
 | `SERVER_TIMEZONE` | `Asia/Jakarta` | Fallback timezone |
-| `GITHUB_MODELS_ENDPOINT` | `https://models.github.ai/inference` | Endpoint provider |
-| `GITHUB_MODELS_MODEL` | `openai/gpt-4.1` | Model tool-calling |
+| `LLM_PROVIDER` | `groq` | Provider hosted yang dipakai agent |
+| `LLM_API_KEY` | kosong | API key provider; jangan commit |
+| `LLM_ENDPOINT` | `https://api.groq.com/openai/v1` | Base URL OpenAI-compatible provider |
+| `LLM_MODEL` | `openai/gpt-oss-120b` | Model tool-calling provider |
+| `LOGIN_RATE_LIMIT` | `10` | Percobaan login per IP per window |
+| `GITHUB_MODELS_ENDPOINT` | `https://models.github.ai/inference` | Fallback kompatibilitas lama |
+| `GITHUB_MODELS_MODEL` | `openai/gpt-4.1` | Fallback model lama |
 | `LLM_MAX_TOOL_CALLS` | `20` | Batas tool call per pertanyaan |
 | `LLM_MAX_TOOL_RESULT_CHARACTERS` | `8000` | Batas context hasil tool |
 | `LLM_MAX_OUTPUT_TOKENS` | `2048` | Budget output provider |
+| `LLM_MAX_REPAIR_ATTEMPTS` | `2` | Maksimum repair claim terverifikasi |
+| `LLM_MAX_PLAN_REVISIONS` | `3` | Maksimum revisi plan operasional |
+| `LLM_MAX_HYPOTHESES` | `8` | Maksimum hypothesis per run |
 | `ALLOW_RAW_LOG_TO_EXTERNAL_PROVIDER` | `false` | Kebijakan raw evidence eksternal |
 
 Lihat [.env.example](.env.example) untuk daftar lengkap.
@@ -289,6 +365,7 @@ Lihat [.env.example](.env.example) untuk daftar lengkap.
 pytest -q backend/tests
 python backend/evals/run_eval.py
 python backend/evals/run_detection_eval.py
+python backend/evals/run_vigil_eval.py
 ```
 
 Pada Windows, jalankan validasi lengkap:
@@ -323,10 +400,12 @@ docker compose up -d --force-recreate backend worker frontend
 
 Refresh browser dengan `Ctrl+F5`.
 
-### Error authentication GitHub Models
+### Error authentication hosted LLM
 
-- Pastikan token aktif dan memiliki izin GitHub Models.
-- Pastikan `GITHUB_MODELS_MODEL` adalah ID model yang mendukung tool-calling.
+- Pastikan `LLM_API_KEY` aktif dan sesuai provider.
+- Pastikan `LLM_MODEL` adalah ID model yang mendukung tool-calling.
+- Gemini API dapat dipakai melalui Google AI Studio free tier dengan
+  `LLM_ENDPOINT=https://generativelanguage.googleapis.com/v1beta/openai/`.
 - Jangan pernah mencetak atau commit token.
 
 ### Parsing job tetap queued
@@ -355,6 +434,8 @@ Jangan gunakan TraceLens sebagai satu-satunya dasar kesimpulan hukum, attributio
 - [Panduan kontribusi](CONTRIBUTING.md)
 - [Pengembangan parser](docs/ADDING_A_PARSER.md)
 - [Threat model](docs/THREAT_MODEL.md)
+- [Dokumentasi arsitektur teknis](docs/TRACELENS_ARSITEKTUR_TEKNIS_ID.md)
+- [Dokumentasi prompt agent VIGIL](docs/TRACELENS_AGENT_PROMPTS_ID.md)
 - [Production readiness](docs/PRODUCTION_READINESS.md)
 - [Build validation report](docs/BUILD_VALIDATION_REPORT.md)
 - [Implementation report](docs/IMPLEMENTATION_REPORT.md)

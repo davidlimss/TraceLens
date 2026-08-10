@@ -7,6 +7,10 @@ services:
     cap_drop: ["ALL"]
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
+      APP_VERSION: "0.2.0-beta.1"
+      APP_ENV: "production"
+      REQUIRE_MIGRATIONS: "true"
+      SCHEMA_REVISION: "0007_vigil_replay_snapshots"
       SECURE_COOKIES: "true"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/ready', timeout=3)"]
@@ -23,6 +27,9 @@ services:
     cap_drop: ["ALL"]
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
+      APP_ENV: "production"
+      REQUIRE_MIGRATIONS: "true"
+      SCHEMA_REVISION: "0007_vigil_replay_snapshots"
 
   scheduler:
     restart: unless-stopped
@@ -33,6 +40,9 @@ services:
     cap_drop: ["ALL"]
     environment:
       PYTHONDONTWRITEBYTECODE: "1"
+      APP_ENV: "production"
+      REQUIRE_MIGRATIONS: "true"
+      SCHEMA_REVISION: "0007_vigil_replay_snapshots"
 
   frontend:
     restart: unless-stopped

@@ -83,7 +83,12 @@ class Event(Base):
     __tablename__ = "events"
     event_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cases.case_id", ondelete="RESTRICT"), index=True)
-    evidence_file_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("evidence_files.evidence_file_id", ondelete="RESTRICT"), index=True)
+    # Uploaded events point to an immutable EvidenceFile. External events are
+    # canonical projections of ExternalEvidence and therefore have no upload
+    # file; both paths still retain an immutable raw snapshot.
+    evidence_file_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("evidence_files.evidence_file_id", ondelete="RESTRICT"), index=True, nullable=True)
+    external_evidence_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("external_evidence.evidence_id", ondelete="RESTRICT"), index=True, nullable=True)
+    event_origin: Mapped[str] = mapped_column(String(32), default="local", index=True)
     timestamp_original: Mapped[str | None] = mapped_column(String(255))
     timestamp_normalized: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
     timezone: Mapped[str | None] = mapped_column(String(64))
@@ -100,7 +105,7 @@ class Event(Base):
     process_name: Mapped[str | None] = mapped_column(String(255))
     file_name: Mapped[str | None] = mapped_column(String(512))
     raw_log: Mapped[str] = mapped_column(Text)
-    raw_line_number: Mapped[int] = mapped_column(Integer)
+    raw_line_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     parser_name: Mapped[str] = mapped_column(String(128))
     parser_confidence: Mapped[float] = mapped_column(Float)
     tags: Mapped[list] = mapped_column(JSON, default=list)
@@ -124,6 +129,7 @@ class Event(Base):
     __table_args__ = (
         Index("ix_events_case_timeline", "case_id", "timestamp_normalized", "timestamp_confidence", "evidence_file_id", "raw_line_number", "event_id"),
         Index("uq_events_evidence_line", "evidence_file_id", "raw_line_number", unique=True),
+        UniqueConstraint("external_evidence_id", name="uq_events_external_evidence"),
     )
 
 
@@ -204,8 +210,127 @@ class AgentRun(Base):
     status: Mapped[str] = mapped_column(String(32), default="running", index=True)
     question: Mapped[str] = mapped_column(Text)
     state: Mapped[dict] = mapped_column(JSON, default=dict)
+    current_step: Mapped[int] = mapped_column(Integer, default=0)
+    cancel_requested: Mapped[bool] = mapped_column(default=False)
+    stop_reason: Mapped[str | None] = mapped_column(Text)
+    prompt_version: Mapped[str | None] = mapped_column(String(64))
+    model_version: Mapped[str | None] = mapped_column(String(128))
+    graph_version: Mapped[str] = mapped_column(String(64), default="investigation-graph-v1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AgentRunSnapshot(Base):
+    """Frozen operational snapshot used for audit, deterministic replay, and diff."""
+    __tablename__ = "agent_run_snapshots"
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_runs.agent_run_id", ondelete="CASCADE"), index=True)
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cases.case_id", ondelete="CASCADE"), index=True)
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), index=True)
+    snapshot_type: Mapped[str] = mapped_column(String(32), default="completion")
+    replay_mode: Mapped[str | None] = mapped_column(String(32))
+    snapshot_version: Mapped[str] = mapped_column(String(32), default="run-snapshot-v1")
+    snapshot_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class AgentStep(Base):
+    """Durable, redacted trace of one model or tool step in an investigation."""
+    __tablename__ = "agent_steps"
+    agent_step_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_runs.agent_run_id", ondelete="CASCADE"), index=True)
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cases.case_id", ondelete="CASCADE"), index=True)
+    step_number: Mapped[int] = mapped_column(Integer)
+    step_type: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(32), default="completed")
+    input_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    output_data: Mapped[dict] = mapped_column(JSON, default=dict)
+    evidence_ids: Mapped[list] = mapped_column(JSON, default=list)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (Index("ix_agent_steps_run_order", "agent_run_id", "step_number", "agent_step_id"),)
+
+
+class EvidenceLedger(Base):
+    """Links an investigation run to evidence it actually observed."""
+    __tablename__ = "evidence_ledgers"
+    ledger_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    agent_run_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("agent_runs.agent_run_id", ondelete="CASCADE"), index=True)
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cases.case_id", ondelete="CASCADE"), index=True)
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), index=True)
+    evidence_kind: Mapped[str] = mapped_column(String(32))
+    source_tool: Mapped[str] = mapped_column(String(128))
+    reference_count: Mapped[int] = mapped_column(Integer, default=1)
+    details: Mapped[dict] = mapped_column(JSON, default=dict)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    __table_args__ = (UniqueConstraint("agent_run_id", "evidence_id", name="uq_evidence_ledger_run_evidence"),)
+
+
+class ExternalEvidence(Base):
+    """Immutable snapshot of a read-only external SIEM result.
+
+    External systems remain the source of truth, but a snapshot is required
+    before the result can be cited by the claim verification gate.  The UUID
+    is therefore a local evidence identifier, not an attacker-controlled ID.
+    """
+    __tablename__ = "external_evidence"
+    evidence_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("cases.case_id", ondelete="RESTRICT"), index=True)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    source_name: Mapped[str] = mapped_column(String(255))
+    external_event_id: Mapped[str] = mapped_column(String(512))
+    timestamp_original: Mapped[str | None] = mapped_column(String(255))
+    timestamp_normalized: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
+    raw_log: Mapped[str] = mapped_column(Text)
+    raw_payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    content_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    query_sha256: Mapped[str] = mapped_column(String(64), index=True)
+    retrieved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    source_ip: Mapped[str | None] = mapped_column(String(255), index=True)
+    username: Mapped[str | None] = mapped_column(String(255), index=True)
+    host: Mapped[str | None] = mapped_column(String(255), index=True)
+    event_action: Mapped[str | None] = mapped_column(String(128))
+    event_outcome: Mapped[str | None] = mapped_column(String(32))
+    severity: Mapped[str] = mapped_column(String(32), default="info")
+    tags: Mapped[list] = mapped_column(JSON, default=list)
+    __table_args__ = (
+        UniqueConstraint("case_id", "provider", "external_event_id", "content_sha256", name="uq_external_evidence_snapshot"),
+    )
+
+
+event.listen(
+    ExternalEvidence.__table__,
+    "after_create",
+    DDL("""
+    CREATE OR REPLACE FUNCTION prevent_external_evidence_mutation() RETURNS trigger AS $$
+    BEGIN
+      IF NEW.raw_log IS DISTINCT FROM OLD.raw_log
+         OR NEW.raw_payload IS DISTINCT FROM OLD.raw_payload
+         OR NEW.content_sha256 IS DISTINCT FROM OLD.content_sha256
+         OR NEW.provider IS DISTINCT FROM OLD.provider
+         OR NEW.external_event_id IS DISTINCT FROM OLD.external_event_id THEN
+        RAISE EXCEPTION 'external evidence fields are immutable';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+    """).execute_if(dialect="postgresql"),
+)
+event.listen(
+    ExternalEvidence.__table__,
+    "after_create",
+    DDL("""
+    CREATE TRIGGER external_evidence_immutable
+      BEFORE UPDATE ON external_evidence FOR EACH ROW
+      EXECUTE FUNCTION prevent_external_evidence_mutation();
+    """).execute_if(dialect="postgresql"),
+)
 
 
 event.listen(
@@ -214,9 +339,11 @@ event.listen(
     DDL("""
     CREATE OR REPLACE FUNCTION prevent_event_evidence_mutation() RETURNS trigger AS $$
     BEGIN
-      IF NEW.raw_log IS DISTINCT FROM OLD.raw_log
+         IF NEW.raw_log IS DISTINCT FROM OLD.raw_log
          OR NEW.raw_line_number IS DISTINCT FROM OLD.raw_line_number
-         OR NEW.evidence_file_id IS DISTINCT FROM OLD.evidence_file_id THEN
+         OR NEW.evidence_file_id IS DISTINCT FROM OLD.evidence_file_id
+         OR NEW.external_evidence_id IS DISTINCT FROM OLD.external_evidence_id
+         OR NEW.event_origin IS DISTINCT FROM OLD.event_origin THEN
         RAISE EXCEPTION 'event evidence fields are immutable';
       END IF;
       RETURN NEW;

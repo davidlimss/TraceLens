@@ -4,8 +4,10 @@ import codecs
 import html
 import json
 import os
+import re
 import time
 import uuid
+from copy import deepcopy
 from collections import Counter
 from io import BytesIO
 from contextlib import asynccontextmanager
@@ -15,6 +17,7 @@ from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request,
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
+import redis
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER
 from reportlab.lib.pagesizes import A4
@@ -25,12 +28,13 @@ from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer, 
 from prometheus_client import CONTENT_TYPE_LATEST, Counter as PromCounter, Gauge, Histogram, generate_latest
 
 from app.config import get_settings
-from app.database import Base, engine, get_db
-from app.models import AuditLog, Case, CaseMembership, Correlation, Event, EvidenceFile, Finding, User, UserSession
+from app.database import engine, get_db
+from app.models import (AgentRun, AgentRunSnapshot, AgentStep, AuditLog, Case, CaseMembership, Correlation, Event,
+                        EvidenceFile, EvidenceLedger, ExternalEvidence, Finding, User, UserSession)
 from app.llm_gateway import AgentRuntimeError, LLMGateway, PROMPT_VERSION
 from app.schemas import (CaseCreate, CaseRead, ChatRequest, ChatResponse, EntityRead, EventContext, EventPage,
-                         CurrentUserRead, EventRead, EvidenceRead, FindingRead, FindingWorkflowUpdate, IntegrityVerificationRead, LoginRequest, ReportExportRequest, ReportExportResponse,
-                         TimelineItem, TimelinePage)
+                         CurrentUserRead, EventRead, EvidenceRead, ExternalEvidenceRead, FindingRead, FindingWorkflowUpdate, IntegrityVerificationRead, LoginRequest, ReportExportRequest, ReportExportResponse,
+                          TimelineItem, TimelinePage, AgentRunRead, AgentStepRead, EvidenceLedgerRead, ReplayRequest)
 from app.auth import (CSRF_COOKIE, SESSION_COOKIE, create_session, get_current_user, hash_password,
                       require_case_permission, require_csrf, token_hash, verify_password)
 from app.security import (FixedWindowRateLimiter, RateLimitExceeded, UploadValidationError, safe_evidence_path,
@@ -40,14 +44,32 @@ from app.tasks import parse_evidence_file
 from app.engine import (RISK_THRESHOLD_VERSION, RISK_VERSION, TIMELINE_SORT_VERSION,
                         rebuild_case_analysis, timeline_order_by)
 from app.agent_tools import TOOL_SCHEMA_VERSION
+from app.external_sources import external_source_health
 from app.tasks import PARSER_VERSION
+from app.vigil import advance_lifecycle, public_state_summary, record_provenance, set_stop
+from app.vigil_policy import InvalidTransition, lifecycle_state
+from app.replay import canonical_hash, create_run_snapshot, deterministic_trace_replay, diff_runs, snapshot_payload
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    if settings.secure_cookies and (settings.bootstrap_admin_password == "change-me-local" or "change-me@" in settings.database_url):
-        raise RuntimeError("Production mode refuses default database or administrator credentials")
-    Base.metadata.create_all(engine)
+    if settings.app_env.lower() in {"production", "prod"}:
+        if settings.bootstrap_admin_password == "change-me-local" or "change-me@" in settings.database_url:
+            raise RuntimeError("Production mode refuses default database or administrator credentials")
+        if not settings.secure_cookies:
+            raise RuntimeError("Production mode requires SECURE_COOKIES=true")
+        if settings.cors_origins.strip() in {"", "*"}:
+            raise RuntimeError("Production mode requires an explicit CORS_ORIGINS allowlist")
+    if settings.require_migrations:
+        with engine.connect() as connection:
+            try:
+                revisions = [row[0] for row in connection.execute(text("SELECT version_num FROM alembic_version"))]
+            except Exception as exc:
+                raise RuntimeError("Database schema is not migrated; run 'alembic upgrade head'") from exc
+            if revisions != [settings.schema_revision]:
+                raise RuntimeError(
+                    f"Database schema revision {revisions!r} does not match required {settings.schema_revision!r}"
+                )
     with Session(engine) as db:
         admin = db.scalar(select(User).where(User.username == settings.bootstrap_admin_username))
         if admin is None:
@@ -55,36 +77,31 @@ async def lifespan(_app: FastAPI):
                          password_hash=hash_password(settings.bootstrap_admin_password), global_role="admin")
             db.add(admin)
             db.commit()
-    if engine.dialect.name == "postgresql":
-        with engine.begin() as connection:
-            connection.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS session_id VARCHAR(255)"))
-            connection.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS timestamp_confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0"))
-            connection.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS timestamp_assumptions JSON NOT NULL DEFAULT '[]'::json"))
-            connection.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS year_source VARCHAR(64)"))
-            connection.execute(text("ALTER TABLE events ADD COLUMN IF NOT EXISTS timezone_source VARCHAR(64)"))
-            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_events_session_id ON events (session_id)"))
-            for statement in (
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS job_id UUID",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS parsing_mode VARCHAR(32) NOT NULL DEFAULT 'strict'",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS total_lines INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS processed_lines INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS parsed_events INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS malformed_lines INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS progress_percent INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS heartbeat_at TIMESTAMPTZ",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS retry_count INTEGER NOT NULL DEFAULT 0",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS completeness_ratio DOUBLE PRECISION NOT NULL DEFAULT 1.0",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS integrity_status VARCHAR(32)",
-                "ALTER TABLE evidence_files ADD COLUMN IF NOT EXISTS integrity_verified_at TIMESTAMPTZ",
-                "CREATE UNIQUE INDEX IF NOT EXISTS ix_evidence_files_job_id ON evidence_files (job_id)",
-            ):
-                connection.execute(text(statement))
     yield
 
 
-app = FastAPI(title="TraceLens AI", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="TraceLens AI", version=get_settings().app_version, lifespan=lifespan)
 settings = get_settings()
 rate_limiter = FixedWindowRateLimiter(settings.redis_url)
+
+
+def active_model_name() -> str:
+    """Return the provider/model actually used by the configured gateway."""
+    return str(settings.llm_model or settings.github_models_model or "unknown")
+
+
+def _investigation_export_snapshot(run: AgentRun | None) -> dict | None:
+    """Return bounded operational VIGIL state for reports, never model reasoning."""
+    if run is None:
+        return None
+    snapshot = public_state_summary(run.state or {})
+    snapshot.update({
+        "agent_run_id": str(run.agent_run_id),
+        "question": run.question,
+        "status": run.status,
+        "stop_reason": run.stop_reason,
+    })
+    return snapshot
 app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.cors_origins.split(",")],
                    allow_credentials=True, allow_methods=["GET", "POST", "PATCH"],
                    allow_headers=["Content-Type", "X-CSRF-Token"])
@@ -92,20 +109,35 @@ app.add_middleware(CORSMiddleware, allow_origins=[x.strip() for x in settings.co
 HTTP_REQUESTS = PromCounter("tracelens_http_requests_total", "HTTP requests", ["method", "route", "status"])
 HTTP_LATENCY = Histogram("tracelens_http_request_duration_seconds", "HTTP request latency", ["method", "route"])
 FINDING_QUEUE = Gauge("tracelens_findings_queue", "Findings by workflow status", ["status"])
+AGENT_RUNS = PromCounter("tracelens_agent_runs_total", "Agent runs completed or failed", ["status", "stop_reason"])
+AGENT_TOOL_CALLS = PromCounter("tracelens_agent_tool_calls_total", "Bounded agent tool calls")
+AGENT_CLAIMS = PromCounter("tracelens_agent_claims_total", "Claims returned by verifier", ["status"])
+AGENT_REJECTED_CLAIMS = PromCounter("tracelens_agent_rejected_claims_total", "Claims rejected by verification gate")
 
 
 @app.middleware("http")
 async def observe_requests(request: Request, call_next):
     started = time.perf_counter()
+    supplied_request_id = request.headers.get("X-Request-ID", "")
+    request_id = supplied_request_id if re.fullmatch(r"[A-Za-z0-9._:-]{1,96}", supplied_request_id) else str(uuid.uuid4())
+    request.state.request_id = request_id
     response_status = 500
+    response = None
     try:
         response = await call_next(request)
         response_status = response.status_code
-        return response
     finally:
         route = getattr(request.scope.get("route"), "path", "unmatched")
         HTTP_REQUESTS.labels(request.method, route, str(response_status)).inc()
         HTTP_LATENCY.labels(request.method, route).observe(time.perf_counter() - started)
+    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    if settings.secure_cookies:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 
 @app.get("/health")
@@ -113,11 +145,33 @@ def health() -> dict:
     return {"status": "ok"}
 
 
+@app.get("/external-sources/status")
+def external_sources_status(user: User = Depends(get_current_user)) -> dict:
+    """Safe provider health/config status; credentials are never returned."""
+    return external_source_health(settings)
+
+
 @app.get("/ready")
 def readiness(db: Session = Depends(get_db)) -> dict:
-    db.execute(text("SELECT 1"))
-    return {"status": "ready", "database": "ok", "parser_version": PARSER_VERSION,
-            "risk_version": RISK_VERSION}
+    checks = {"database": "ok", "redis": "ok", "evidence_storage": "ok"}
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception:
+        checks["database"] = "failed"
+    try:
+        redis.Redis.from_url(settings.redis_url, socket_connect_timeout=0.5, socket_timeout=0.5).ping()
+    except Exception:
+        checks["redis"] = "failed"
+    try:
+        settings.evidence_storage_path.mkdir(parents=True, exist_ok=True)
+        if not settings.evidence_storage_path.is_dir() or not os.access(settings.evidence_storage_path, os.W_OK):
+            checks["evidence_storage"] = "failed"
+    except Exception:
+        checks["evidence_storage"] = "failed"
+    if any(value != "ok" for value in checks.values()):
+        raise HTTPException(status_code=503, detail={"status": "not_ready", "checks": checks})
+    return {"status": "ready", **checks, "schema_revision": settings.schema_revision,
+            "parser_version": PARSER_VERSION, "risk_version": RISK_VERSION}
 
 
 @app.get("/metrics", include_in_schema=False)
@@ -129,7 +183,17 @@ def metrics(db: Session = Depends(get_db)) -> Response:
 
 
 @app.post("/auth/login", response_model=CurrentUserRead)
-def login(payload: LoginRequest, response: Response, db: Session = Depends(get_db)) -> User:
+def login(payload: LoginRequest, request: Request, response: Response, db: Session = Depends(get_db)) -> User:
+    # Login is deliberately rate-limited before credential lookup so invalid
+    # usernames cannot be used to bypass the per-IP protection.
+    enforce_rate_limit(request, "login", settings.login_rate_limit)
+    normalized_username = payload.username.strip().lower()
+    try:
+        rate_limiter.check(f"login-user:{normalized_username}", settings.login_rate_limit * 2,
+                           settings.rate_limit_window_seconds)
+    except RateLimitExceeded as exc:
+        raise HTTPException(status_code=429, detail={"code": "rate_limit_exceeded", "message": "Too many requests"},
+                            headers={"Retry-After": str(settings.rate_limit_window_seconds)}) from exc
     user = db.scalar(select(User).where(User.username == payload.username))
     if user is None or not user.is_active or not verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail={"code": "invalid_credentials", "message": "Invalid username or password"})
@@ -178,15 +242,20 @@ def audit_upload_rejection(db: Session, case_id: uuid.UUID, reason: str, filenam
 def agent_audit_details(response: ChatResponse, metrics: dict, question: str) -> dict:
     return {"question_length": len(question), "claim_count": len(response.claims),
             "answer": response.answer,
-            "claims": [{"claim_id": claim.claim_id, "text": claim.text, "status": claim.status,
+            "claims": [{"claim_id": claim.claim_id, "hypothesis_id": claim.hypothesis_id, "text": claim.text, "status": claim.status,
                         "evidence_id": str(claim.evidence_id),
                         "supporting_evidence_ids": [str(item) for item in claim.supporting_evidence_ids],
                         "contradicting_evidence_ids": [str(item) for item in claim.contradicting_evidence_ids],
-                        "confidence": claim.confidence, "limitations": claim.limitations}
+                        "confidence": claim.confidence, "limitations": claim.limitations,
+                        "verification_status": claim.verification_status,
+                        "verification_reasons": claim.verification_reasons}
                        for claim in response.claims],
             "evidence_ids": sorted({str(item) for claim in response.claims
                                     for item in (claim.supporting_evidence_ids or [claim.evidence_id])}),
-            "tool_schema_version": TOOL_SCHEMA_VERSION, **metrics}
+            "tool_schema_version": TOOL_SCHEMA_VERSION,
+            "investigation": response.investigation,
+            "verification_summary": response.verification_summary,
+            **metrics}
 
 
 @app.post("/cases", response_model=CaseRead, status_code=status.HTTP_201_CREATED)
@@ -365,6 +434,16 @@ def get_event_context(case_id: uuid.UUID, event_id: uuid.UUID, window: int = Que
     return EventContext(event=target, before=ordered[max(0, index - window):index], after=ordered[index + 1:index + 1 + window])
 
 
+@app.get("/cases/{case_id}/external-evidence/{evidence_id}", response_model=ExternalEvidenceRead)
+def get_external_evidence(case_id: uuid.UUID, evidence_id: uuid.UUID,
+                          _user: User = Depends(require_case_permission("read")), db: Session = Depends(get_db)) -> ExternalEvidenceRead:
+    evidence = db.scalar(select(ExternalEvidence).where(
+        ExternalEvidence.case_id == case_id, ExternalEvidence.evidence_id == evidence_id))
+    if evidence is None:
+        raise HTTPException(status_code=404, detail={"code": "evidence_not_found", "message": "External evidence not found"})
+    return ExternalEvidenceRead.model_validate(evidence)
+
+
 @app.get("/cases/{case_id}/timeline", response_model=TimelinePage)
 def get_timeline(
     case_id: uuid.UUID, page: int = Query(1, ge=1), page_size: int = Query(50, ge=1, le=200),
@@ -462,15 +541,202 @@ def chat(case_id: uuid.UUID, payload: ChatRequest, request: Request,
     try:
         response, metrics = LLMGateway(settings).chat(db, case_id, payload.question)
     except AgentRuntimeError as exc:
-        db.add(AuditLog(case_id=case_id, action="agent_chat_failed", actor=user.username, model_version=settings.github_models_model,
+        AGENT_RUNS.labels("failed", "PROVIDER_FAILURE").inc()
+        db.add(AuditLog(case_id=case_id, action="agent_chat_failed", actor=user.username, model_version=active_model_name(),
                         prompt_version=PROMPT_VERSION, details={"error": str(exc)}))
         db.commit()
         raise HTTPException(status_code=503, detail={"code": "agent_unavailable", "message": str(exc)}) from exc
-    db.add(AuditLog(case_id=case_id, action="agent_chat_completed", actor=user.username, model_version=settings.github_models_model,
+    db.add(AuditLog(case_id=case_id, action="agent_chat_completed", actor=user.username, model_version=active_model_name(),
                     prompt_version=PROMPT_VERSION,
                     details=agent_audit_details(response, metrics, payload.question)))
+    AGENT_RUNS.labels(response.run_status or "unknown", str(response.investigation.get("stop_state", {}).get("reason") or "unknown")).inc()
+    AGENT_TOOL_CALLS.inc(float(metrics.get("tool_calls") or 0))
+    for claim in response.claims:
+        AGENT_CLAIMS.labels(claim.status).inc()
+    AGENT_REJECTED_CLAIMS.inc(float(response.verification_summary.get("rejected_count") or 0))
     db.commit()
     return response
+
+
+def _agent_run_summary(run: AgentRun) -> dict:
+    state = run.state or {}
+    trajectory = state.get("trajectory") or []
+    return {**public_state_summary(state),
+        "completed_steps": state.get("completed_steps") or [],
+        "collected_evidence_count": len(state.get("collected_evidence_ids") or []),
+        "trajectory_count": len(trajectory),
+        "last_trajectory": trajectory[-1] if trajectory else None,
+    }
+
+
+def _agent_run_read(run: AgentRun) -> AgentRunRead:
+    return AgentRunRead(
+        agent_run_id=run.agent_run_id, case_id=run.case_id, state_version=run.state_version,
+        status=run.status, question=run.question, current_step=run.current_step,
+        cancel_requested=run.cancel_requested, stop_reason=run.stop_reason,
+        prompt_version=run.prompt_version, model_version=run.model_version,
+        graph_version=run.graph_version, state_summary=_agent_run_summary(run),
+        created_at=run.created_at, updated_at=run.updated_at,
+    )
+
+
+@app.get("/cases/{case_id}/agent-runs", response_model=list[AgentRunRead])
+def list_agent_runs(case_id: uuid.UUID, user: User = Depends(require_case_permission("chat")),
+                    db: Session = Depends(get_db)) -> list[AgentRunRead]:
+    runs = list(db.scalars(select(AgentRun).where(AgentRun.case_id == case_id)
+                           .order_by(AgentRun.updated_at.desc(), AgentRun.agent_run_id.desc()).limit(50)))
+    return [_agent_run_read(run) for run in runs]
+
+
+@app.get("/cases/{case_id}/agent-runs/{run_id}")
+def get_agent_run(case_id: uuid.UUID, run_id: uuid.UUID,
+                  user: User = Depends(require_case_permission("chat")),
+                  db: Session = Depends(get_db)) -> dict:
+    run = db.scalar(select(AgentRun).where(AgentRun.case_id == case_id, AgentRun.agent_run_id == run_id))
+    if run is None:
+        raise HTTPException(status_code=404, detail={"code": "agent_run_not_found", "message": "Investigation run not found"})
+    steps = list(db.scalars(select(AgentStep).where(AgentStep.case_id == case_id, AgentStep.agent_run_id == run_id)
+                            .order_by(AgentStep.step_number.asc(), AgentStep.agent_step_id.asc())))
+    ledger = list(db.scalars(select(EvidenceLedger).where(EvidenceLedger.case_id == case_id, EvidenceLedger.agent_run_id == run_id)
+                             .order_by(EvidenceLedger.first_seen_at.asc(), EvidenceLedger.ledger_id.asc())))
+    snapshots = list(db.scalars(select(AgentRunSnapshot).where(AgentRunSnapshot.case_id == case_id,
+                                                               AgentRunSnapshot.agent_run_id == run_id)
+                                .order_by(AgentRunSnapshot.created_at.desc()).limit(10)))
+    return {"run": _agent_run_read(run),
+            "investigation": public_state_summary(run.state or {}),
+            "steps": [AgentStepRead.model_validate(item) for item in steps],
+            "evidence_ledger": [EvidenceLedgerRead.model_validate(item) for item in ledger],
+            "snapshots": [{"snapshot_id": str(item.snapshot_id), "snapshot_type": item.snapshot_type,
+                           "replay_mode": item.replay_mode, "snapshot_hash": item.snapshot_hash,
+                           "source_run_id": str(item.source_run_id) if item.source_run_id else None,
+                           "created_at": item.created_at.isoformat()} for item in snapshots]}
+
+
+@app.post("/cases/{case_id}/agent-runs/{run_id}/replay")
+def replay_agent_run(case_id: uuid.UUID, run_id: uuid.UUID, payload: ReplayRequest,
+                     user: User = Depends(require_case_permission("chat")), _csrf: User = Depends(require_csrf),
+                     db: Session = Depends(get_db)) -> dict:
+    original = db.scalar(select(AgentRun).where(AgentRun.case_id == case_id, AgentRun.agent_run_id == run_id))
+    if original is None:
+        raise HTTPException(status_code=404, detail={"code": "agent_run_not_found", "message": "Investigation run not found"})
+    if payload.mode == "model_re_evaluation":
+        raise HTTPException(status_code=501, detail={
+            "code": "model_re_evaluation_not_enabled",
+            "message": "Model re-evaluation requires an explicitly configured frozen-provider evaluation environment",
+        })
+    steps = list(db.scalars(select(AgentStep).where(AgentStep.case_id == case_id, AgentStep.agent_run_id == run_id)
+                            .order_by(AgentStep.step_number.asc())))
+    ledger = list(db.scalars(select(EvidenceLedger).where(EvidenceLedger.case_id == case_id,
+                                                           EvidenceLedger.agent_run_id == run_id)))
+    source_payload = snapshot_payload(original, steps=steps, ledger=ledger)
+    replay_result = deterministic_trace_replay(source_payload)
+    replay_state = deepcopy(original.state or {})
+    replay_state["replay_of_run_id"] = str(original.agent_run_id)
+    replay_state["replay_mode"] = payload.mode
+    replay_state["replay_result"] = replay_result
+    replay_state["run_snapshot"] = None
+    replay_run = AgentRun(case_id=case_id, question=original.question, state=replay_state,
+                          state_version=original.state_version, status="complete",
+                          stop_reason=original.stop_reason, prompt_version=original.prompt_version,
+                          model_version=original.model_version, graph_version=original.graph_version)
+    db.add(replay_run)
+    db.flush()
+    snapshot = create_run_snapshot(db, replay_run, snapshot_type="replay",
+                                   replay_mode=payload.mode, source_run_id=original.agent_run_id)
+    db.add(AuditLog(case_id=case_id, action="agent_run_replayed", actor=user.username,
+                    model_version=original.model_version, prompt_version=original.prompt_version,
+                    details={"source_run_id": str(run_id), "replay_run_id": str(replay_run.agent_run_id),
+                             "mode": payload.mode, "replay_hash": replay_result["replay_hash"]}))
+    db.commit()
+    return {"run": _agent_run_read(replay_run), "replay": replay_result,
+            "snapshot": {"snapshot_id": str(snapshot.snapshot_id), "snapshot_hash": snapshot.snapshot_hash}}
+
+
+@app.get("/cases/{case_id}/agent-runs/{run_id}/diff/{other_run_id}")
+def diff_agent_runs(case_id: uuid.UUID, run_id: uuid.UUID, other_run_id: uuid.UUID,
+                    user: User = Depends(require_case_permission("chat")), db: Session = Depends(get_db)) -> dict:
+    runs = list(db.scalars(select(AgentRun).where(AgentRun.case_id == case_id,
+                                                   AgentRun.agent_run_id.in_([run_id, other_run_id]))))
+    by_id = {item.agent_run_id: item for item in runs}
+    if run_id not in by_id or other_run_id not in by_id:
+        raise HTTPException(status_code=404, detail={"code": "agent_run_not_found", "message": "Both runs must belong to the active case"})
+    payloads = {}
+    for item in (by_id[run_id], by_id[other_run_id]):
+        steps = list(db.scalars(select(AgentStep).where(AgentStep.case_id == case_id,
+                                                        AgentStep.agent_run_id == item.agent_run_id)
+                                 .order_by(AgentStep.step_number.asc())))
+        ledger = list(db.scalars(select(EvidenceLedger).where(EvidenceLedger.case_id == case_id,
+                                                              EvidenceLedger.agent_run_id == item.agent_run_id)))
+        payloads[item.agent_run_id] = snapshot_payload(item, steps=steps, ledger=ledger)
+    return diff_runs(payloads[run_id], payloads[other_run_id])
+
+
+def _set_agent_run_control(case_id: uuid.UUID, run_id: uuid.UUID, *, status: str,
+                           reason: str, actor: str, db: Session) -> AgentRun:
+    run = db.scalar(select(AgentRun).where(AgentRun.case_id == case_id, AgentRun.agent_run_id == run_id))
+    if run is None:
+        raise HTTPException(status_code=404, detail={"code": "agent_run_not_found", "message": "Investigation run not found"})
+    if run.status in {"complete", "cancelled"}:
+        raise HTTPException(status_code=409, detail={"code": "agent_run_terminal", "message": "Investigation run is already terminal"})
+    run.cancel_requested = True
+    run.status = status
+    structured_reason = "USER_PAUSED" if status == "paused" else "USER_CANCELLED" if status == "cancelled" else reason
+    run.stop_reason = structured_reason
+    target_state = "PAUSED" if status == "paused" else "CANCELLED" if status == "cancelled" else "FAILED"
+    try:
+        if lifecycle_state(run.state or {}) != target_state:
+            advance_lifecycle(run.state or {}, target_state, structured_reason)
+    except InvalidTransition as exc:
+        raise HTTPException(status_code=409, detail={"code": "invalid_state_transition", "message": str(exc)}) from exc
+    set_stop(run.state or {}, structured_reason, reason)
+    run.updated_at = datetime.now(timezone.utc)
+    db.add(AuditLog(case_id=case_id, action=f"agent_run_{status}", actor=actor,
+                    model_version=run.model_version, prompt_version=run.prompt_version,
+                    details={"agent_run_id": str(run_id), "reason": reason, "current_step": run.current_step}))
+    db.commit()
+    db.refresh(run)
+    return run
+
+
+@app.post("/cases/{case_id}/agent-runs/{run_id}/pause", response_model=AgentRunRead)
+def pause_agent_run(case_id: uuid.UUID, run_id: uuid.UUID,
+                    user: User = Depends(require_case_permission("chat")), _csrf: User = Depends(require_csrf),
+                    db: Session = Depends(get_db)) -> AgentRunRead:
+    return _agent_run_read(_set_agent_run_control(case_id, run_id, status="paused",
+                                                    reason="USER_PAUSED", actor=user.username, db=db))
+
+
+@app.post("/cases/{case_id}/agent-runs/{run_id}/cancel", response_model=AgentRunRead)
+def cancel_agent_run(case_id: uuid.UUID, run_id: uuid.UUID,
+                     user: User = Depends(require_case_permission("chat")), _csrf: User = Depends(require_csrf),
+                     db: Session = Depends(get_db)) -> AgentRunRead:
+    return _agent_run_read(_set_agent_run_control(case_id, run_id, status="cancelled",
+                                                    reason="USER_CANCELLED", actor=user.username, db=db))
+
+
+@app.post("/cases/{case_id}/agent-runs/{run_id}/resume")
+def resume_agent_run(case_id: uuid.UUID, run_id: uuid.UUID,
+                     user: User = Depends(require_case_permission("chat")), _csrf: User = Depends(require_csrf),
+                     db: Session = Depends(get_db)) -> dict:
+    run = db.scalar(select(AgentRun).where(AgentRun.case_id == case_id, AgentRun.agent_run_id == run_id))
+    if run is None:
+        raise HTTPException(status_code=404, detail={"code": "agent_run_not_found", "message": "Investigation run not found"})
+    if run.status not in {"failed", "paused"}:
+        raise HTTPException(status_code=409, detail={"code": "agent_run_not_resumable", "message": f"Run status is {run.status}"})
+    try:
+        response, metrics = LLMGateway(settings).chat(db, case_id, run_id=run_id)
+    except AgentRuntimeError as exc:
+        db.add(AuditLog(case_id=case_id, action="agent_run_resume_failed", actor=user.username,
+                        model_version=active_model_name(), prompt_version=PROMPT_VERSION,
+                        details={"agent_run_id": str(run_id), "error": str(exc)}))
+        db.commit()
+        raise HTTPException(status_code=503, detail={"code": "agent_unavailable", "message": str(exc)}) from exc
+    db.add(AuditLog(case_id=case_id, action="agent_run_resumed", actor=user.username,
+                    model_version=active_model_name(), prompt_version=PROMPT_VERSION,
+                    details={"agent_run_id": str(run_id), **metrics, "question": run.question,
+                             "claim_count": len(response.claims)}))
+    db.commit()
+    return {"response": response, "run": _agent_run_read(db.get(AgentRun, run_id)), "metrics": metrics}
 
 
 def finding_recommendations(finding: Finding) -> list[tuple[str, str]]:
@@ -493,8 +759,10 @@ def finding_recommendations(finding: Finding) -> list[tuple[str, str]]:
 
 
 def build_markdown_report(case_id: uuid.UUID, findings: list[Finding], evidence_files: list[EvidenceFile] | None = None,
-                          *, case_name: str | None = None, events: list[Event] | None = None) -> str:
+                          *, case_name: str | None = None, events: list[Event] | None = None,
+                          investigation: dict | None = None) -> str:
     events = events or []
+    section_offset = 1 if investigation else 0
     highest = max((item.risk_score for item in findings), default=0.0)
     risk_level = ("critical" if highest >= .85 else "high" if highest >= .7 else
                   "medium" if highest >= .4 else "low")
@@ -532,7 +800,60 @@ def build_markdown_report(case_id: uuid.UUID, findings: list[Finding], evidence_
         lines.extend(["", "<details>", "<summary>Evidence IDs dan breakdown teknis</summary>", "",
                       "**Evidence IDs**", ""] + [f"- `{item}`" for item in finding.evidence_ids] +
                      ["", "```json", json.dumps(finding.risk_breakdown, indent=2), "```", "", "</details>"])
-    lines.extend(["", "## 3. Rundown Timeline", ""])
+    if investigation:
+        plan = investigation.get("plan") or {}
+        steps = plan.get("steps") or []
+        hypotheses = investigation.get("hypotheses") or []
+        gaps = investigation.get("evidence_gaps") or []
+        verification = investigation.get("verification_summary") or {}
+        lines.extend(["", "## 3. Investigation Trace (VIGIL)", "",
+                      f"- **Run ID:** `{investigation.get('agent_run_id', 'â€”')}`",
+                      f"- **Goal:** {investigation.get('question') or plan.get('investigation_goal') or 'â€”'}",
+                      f"- **Status:** `{investigation.get('status') or 'â€”'}`",
+                      f"- **Stop reason:** `{investigation.get('stop_reason') or (investigation.get('stop_state') or {}).get('reason') or 'â€”'}`",
+                      "", "### Plan", ""])
+        for step in steps:
+            lines.append(f"- `{step.get('status', 'pending')}` {step.get('objective', 'â€”')}")
+        lines.extend(["", "### Hypotheses", ""])
+        if hypotheses:
+            for item in hypotheses:
+                lines.append(f"- `{item.get('hypothesis_id', 'â€”')}` `{item.get('status', 'unresolved')}` — {item.get('statement', 'â€”')}")
+        else:
+            lines.append("Tidak ada hypothesis yang diregistrasikan.")
+        if hypotheses:
+            lines.extend(["", "### Hypothesis evidence links", ""])
+            for item in hypotheses:
+                hypothesis_id = item.get("hypothesis_id", "unknown")
+                lines.append(f"#### {hypothesis_id}")
+                supporting = [str(value) for value in (item.get("supporting_evidence_ids") or [])]
+                contradicting = [str(value) for value in (item.get("contradicting_evidence_ids") or [])]
+                missing = [str(value) for value in (item.get("missing_evidence") or [])]
+                alternatives = [str(value) for value in (item.get("alternative_explanations") or [])]
+                lines.append(f"- Supporting evidence: {', '.join(supporting) if supporting else 'none'}")
+                lines.append(f"- Contradicting evidence: {', '.join(contradicting) if contradicting else 'none'}")
+                lines.append(f"- Missing evidence: {'; '.join(missing) if missing else 'none'}")
+                lines.append(f"- Alternative explanations: {'; '.join(alternatives) if alternatives else 'none'}")
+        lines.extend(["", f"### Evidence gaps ({len(gaps)})", ""])
+        for gap in gaps[:24]:
+            lines.append(f"- **{gap.get('priority', 'medium')}** {gap.get('description', 'â€”')}")
+        if not gaps:
+            lines.append("Tidak ada evidence gap terbuka pada snapshot ini.")
+        rejection_reasons = verification.get("rejection_reasons") or []
+        lines.extend(["", "### Verification", "",
+                      f"- Verified: {verification.get('verified_count', 'â€”')}",
+                      f"- Rejected: {verification.get('rejected_count', 'â€”')}",
+                      f"- Repair attempts: {(investigation.get('repair_state') or {}).get('attempt_count', 'â€”')}",
+                      "", "Trace ini berisi metadata operasional, bukan chain-of-thought."])
+        if rejection_reasons:
+            lines.extend(["", "#### Verification rejection reasons", ""])
+            for reason in rejection_reasons[:24]:
+                if isinstance(reason, dict):
+                    code = reason.get("reason_code") or reason.get("code") or "UNKNOWN"
+                    detail = reason.get("detail") or reason.get("message") or ""
+                    lines.append(f"- **{code}** {detail}".rstrip())
+                else:
+                    lines.append(f"- {reason}")
+    lines.extend(["", f"## {3 + section_offset}. Rundown Timeline", ""])
     if not events:
         lines.append("Rundown event tidak tersedia pada export ini.")
     else:
@@ -543,20 +864,20 @@ def build_markdown_report(case_id: uuid.UUID, findings: list[Finding], evidence_
             lines.append(f"| {timestamp} | {event.severity} | {event.event_action} / {event.event_outcome or '—'} | {entity} | `{event.event_id}` L{event.raw_line_number} |")
         if len(events) > 100:
             lines.extend(["", f"> Rundown dibatasi 100 dari {len(events)} event. Gunakan halaman Timeline untuk meninjau keseluruhan event."])
-    lines.extend(["", "## 4. Evidence Appendix", ""])
+    lines.extend(["", f"## {4 + section_offset}. Evidence Appendix", ""])
     for evidence in evidence_files or []:
         lines.extend([f"### {evidence.original_filename}",
                       f"- Evidence file ID: {evidence.evidence_file_id}",
                       f"- SHA-256: `{evidence.sha256}`", f"- Integrity: {evidence.integrity_status or 'not_verified'}",
                       f"- Parser mode/status: {evidence.parsing_mode} / {evidence.status}",
                       f"- Completeness: {evidence.completeness_ratio:.5f}", ""])
-    lines.extend(["## 5. Metodologi dan Version Appendix", "",
+    lines.extend([f"## {5 + section_offset}. Metodologi dan Version Appendix", "",
                   "Parsing, timeline, korelasi, finding, dan risk scoring dilakukan secara deterministik. LLM hanya digunakan untuk interpretasi berbasis tool dan claim yang lolos verification gate.", "",
                   f"- Parser: {PARSER_VERSION}",
                   f"- Timeline sorting: {TIMELINE_SORT_VERSION}", f"- Risk model: {RISK_VERSION}",
                   f"- Risk thresholds: {RISK_THRESHOLD_VERSION}", f"- Prompt: {PROMPT_VERSION}",
-                  f"- Tool schema: {TOOL_SCHEMA_VERSION}", f"- Model: {settings.github_models_model}"])
-    lines.extend(["", "## 6. Batasan", "",
+                  f"- Tool schema: {TOOL_SCHEMA_VERSION}", f"- Model: {active_model_name()}"])
+    lines.extend(["", f"## {6 + section_offset}. Batasan", "",
                   "- Citation valid menunjukkan evidence tersedia, tetapi interpretasi tetap harus ditinjau investigator.",
                   "- Tidak adanya finding bukan bukti bahwa insiden tidak terjadi.",
                   "- Rekomendasi harus disesuaikan dengan dampak bisnis, arsitektur, dan prosedur respons organisasi."])
@@ -619,14 +940,14 @@ def build_pdf_report(case: Case, findings: list[Finding], evidence_files: list[E
         story.extend([Paragraph(evidence.original_filename, styles["Heading3"]),
                       Paragraph(f"ID: {evidence.evidence_file_id}<br/>SHA-256: {evidence.sha256}<br/>Integrity: {evidence.integrity_status or 'not_verified'}<br/>Status: {evidence.status} · Completeness: {evidence.completeness_ratio:.5f}", styles["SmallReport"])])
     story.extend([Spacer(1,5*mm), Paragraph("Version Appendix", styles["Heading2"]),
-                  Paragraph(f"Parser {PARSER_VERSION} · Timeline {TIMELINE_SORT_VERSION} · Risk {RISK_VERSION} · Prompt {PROMPT_VERSION} · Tools {TOOL_SCHEMA_VERSION} · Model {settings.github_models_model}", styles["SmallReport"]),
+                  Paragraph(f"Parser {PARSER_VERSION} · Timeline {TIMELINE_SORT_VERSION} · Risk {RISK_VERSION} · Prompt {PROMPT_VERSION} · Tools {TOOL_SCHEMA_VERSION} · Model {active_model_name()}", styles["SmallReport"]),
                   Paragraph("Catatan: risk score bersifat heuristik dan bukan probabilitas kompromi. Interpretasi AI wajib diverifikasi investigator.", styles["SmallReport"])])
     document.build(story)
     return buffer.getvalue()
 
 
 def build_formal_pdf_report(case: Case, findings: list[Finding], evidence_files: list[EvidenceFile],
-                            events: list[Event]) -> bytes:
+                            events: list[Event], *, investigation: dict | None = None) -> bytes:
     """Build a portrait A4 report whose table cells always wrap within their columns."""
     buffer = BytesIO()
     styles = getSampleStyleSheet()
@@ -758,6 +1079,28 @@ def build_formal_pdf_report(case: Case, findings: list[Finding], evidence_files:
                   Paragraph("Grafik menampilkan maksimal lima kategori terbesar. Skor risiko bersifat heuristik dan bukan probabilitas kompromi. Tidak adanya temuan rule-based tidak membuktikan bahwa sistem bebas insiden.", styles["FormalSmall"]),
                   Paragraph("2. Temuan dan Rekomendasi", styles["FormalSection"])])
 
+    if investigation:
+        plan = investigation.get("plan") or {}
+        steps = plan.get("steps") or []
+        hypotheses = investigation.get("hypotheses") or []
+        gaps = investigation.get("evidence_gaps") or []
+        verification = investigation.get("verification_summary") or {}
+        story.extend([Paragraph("Trace Investigasi VIGIL", styles["FormalSection"]),
+                      Paragraph(f"Goal: {html.escape(str(investigation.get('question') or plan.get('investigation_goal') or 'â€”'))}<br/>"
+                                f"Run: {html.escape(str(investigation.get('agent_run_id') or 'â€”'))}<br/>"
+                                f"Stop reason: {html.escape(str(investigation.get('stop_reason') or (investigation.get('stop_state') or {}).get('reason') or 'â€”'))}",
+                                styles["FormalBody"]),
+                      Paragraph("Plan", styles["FormalSubsection"])])
+        for step in steps:
+            story.append(Paragraph(f"- [{html.escape(str(step.get('status') or 'pending'))}] {html.escape(str(step.get('objective') or 'â€”'))}", styles["FormalBody"]))
+        if hypotheses:
+            story.append(Paragraph("Hypotheses", styles["FormalSubsection"]))
+            for item in hypotheses:
+                story.append(Paragraph(f"- {html.escape(str(item.get('hypothesis_id') or 'â€”'))} / {html.escape(str(item.get('status') or 'unresolved'))}: {html.escape(str(item.get('statement') or 'â€”'))}", styles["FormalBody"]))
+        if gaps:
+            story.append(Paragraph(f"Evidence gaps terbuka: {len(gaps)}. Verification verified={verification.get('verified_count', 'â€”')}, rejected={verification.get('rejected_count', 'â€”')}.", styles["FormalSmall"]))
+        story.append(Paragraph("Trace ini adalah metadata operasional dan tidak memuat chain-of-thought.", styles["FormalSmall"]))
+
     if not findings:
         story.append(Paragraph("Belum ada temuan rule-based. Tinjau kelengkapan evidence, cakupan telemetry, dan event dengan parser confidence rendah.", styles["FormalBody"]))
     for index, finding in enumerate(findings, 1):
@@ -822,7 +1165,7 @@ def build_formal_pdf_report(case: Case, findings: list[Finding], evidence_files:
     story.extend([
         Paragraph("5. Metodologi dan Versi", styles["FormalSection"]),
         Paragraph("Parsing, timeline, korelasi, finding, dan risk scoring dilakukan secara deterministik. LLM digunakan untuk interpretasi berbasis tool; claim tetap melewati verification gate.", styles["FormalBody"]),
-        Paragraph(f"Parser: {PARSER_VERSION}<br/>Timeline: {TIMELINE_SORT_VERSION}<br/>Risk model: {RISK_VERSION}<br/>Prompt: {PROMPT_VERSION}<br/>Tool schema: {TOOL_SCHEMA_VERSION}<br/>Model: {html.escape(settings.github_models_model)}", styles["FormalSmall"]),
+        Paragraph(f"Parser: {PARSER_VERSION}<br/>Timeline: {TIMELINE_SORT_VERSION}<br/>Risk model: {RISK_VERSION}<br/>Prompt: {PROMPT_VERSION}<br/>Tool schema: {TOOL_SCHEMA_VERSION}<br/>Model: {html.escape(active_model_name())}", styles["FormalSmall"]),
         Paragraph("6. Batasan", styles["FormalSection"]),
         Paragraph("- Citation valid menunjukkan evidence tersedia, tetapi interpretasi tetap harus ditinjau investigator.<br/>- Tidak adanya finding bukan bukti bahwa insiden tidak terjadi.<br/>- Rekomendasi harus disesuaikan dengan dampak bisnis, arsitektur, dan prosedur respons organisasi.", styles["FormalBody"])])
     document.build(story, onFirstPage=header_footer, onLaterPages=header_footer)
@@ -856,13 +1199,23 @@ def export_report(case_id: uuid.UUID, payload: ReportExportRequest,
     findings = list(db.scalars(select(Finding).where(Finding.case_id == case_id)
                                .order_by(Finding.risk_score.desc(), Finding.first_seen, Finding.finding_id)))
     events = list(db.scalars(select(Event).where(Event.case_id == case_id).order_by(*timeline_order_by())))
+    latest_run = db.scalar(select(AgentRun).where(AgentRun.case_id == case_id)
+                           .order_by(AgentRun.updated_at.desc(), AgentRun.agent_run_id.desc()))
+    investigation = _investigation_export_snapshot(latest_run)
     export_id = uuid.uuid4()
-    content = (build_markdown_report(case_id, findings, evidence_files, case_name=case.name, events=events) if payload.format == "markdown"
-               else base64.b64encode(build_formal_pdf_report(case, findings, evidence_files, events)).decode("ascii"))
+    content = (build_markdown_report(case_id, findings, evidence_files, case_name=case.name, events=events,
+                                     investigation=investigation) if payload.format == "markdown"
+               else base64.b64encode(build_formal_pdf_report(case, findings, evidence_files, events,
+                                                             investigation=investigation)).decode("ascii"))
     evidence_ids = sorted({str(evidence_id) for finding in findings for evidence_id in finding.evidence_ids})
+    if latest_run is not None:
+        latest_run.state = dict(latest_run.state or {})
+        record_provenance(latest_run.state, "agent_run", str(latest_run.agent_run_id),
+                          "report", str(export_id), "exported_to")
     db.add(AuditLog(case_id=case_id, action="report_export_generated", actor=user.username,
                     details={"export_id": str(export_id), "format": payload.format,
                              "finding_count": len(findings), "event_count": len(events),
-                             "evidence_ids": evidence_ids}))
+                             "evidence_ids": evidence_ids,
+                             "agent_run_id": str(latest_run.agent_run_id) if latest_run else None}))
     db.commit()
     return ReportExportResponse(export_id=export_id, format=payload.format, content=content)

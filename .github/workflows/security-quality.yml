@@ -21,11 +21,14 @@ jobs:
         run: |
           pip install -r requirements.txt pip-audit
           pytest -q
+          python evals/run_vigil_eval.py
+          python evals/run_detection_eval.py
           pip-audit -r requirements.txt
       - name: Frontend build and dependency audit
         working-directory: frontend
         run: |
           npm ci
+          npm run typecheck
           npm run build
           npm audit --audit-level=high
       - name: Build production images

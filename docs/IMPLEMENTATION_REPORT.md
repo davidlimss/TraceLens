@@ -1,5 +1,19 @@
 # Laporan Peningkatan TraceLens AI
 
+> **Addendum productization — 9 Agustus 2026**
+>
+> Baseline dokumen di bawah ini adalah laporan historis fase MVP. Pada fase
+> productization, schema resmi telah dinaikkan ke `0006_production_hardening`;
+> API tidak lagi melakukan DDL saat startup, readiness memeriksa PostgreSQL,
+> Redis, dan evidence storage, login memiliki rate limit, dan response header
+> keamanan/request ID sudah aktif. Validasi terbaru: backend **76 passed**,
+> VIGIL evaluation **6/6**, detection golden evaluation **6/6**, frontend
+> typecheck/build **passed**, dan Docker production build **passed**.
+>
+> Status jujur tetap **production-oriented beta foundation**. TLS/WAF, secret
+> manager, managed storage, restore drill, DAST, load/soak, dan sign-off
+> operator masih merupakan gate lingkungan.
+
 ## Ringkasan
 
 Peningkatan ini memindahkan aplikasi dari demonstrator analisis log menjadi fondasi investigasi keamanan yang lebih dapat diaudit. Parser dan event model telah diperkaya, aturan deteksi ditambah, temuan diberi pemetaan MITRE ATT&CK dan confidence terpisah dari risk, laporan diperbaiki, serta evaluasi deterministik ditambahkan.

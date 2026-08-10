@@ -52,7 +52,7 @@ flowchart LR
 | Database | PostgreSQL | Metadata case/evidence, event, correlation, finding, audit log |
 | Queue | Redis | Broker Celery dan fixed-window rate limit |
 | Evidence storage | Docker volume | Menyimpan file upload dengan nama UUID |
-| LLM provider | GitHub Models, GPT-4.1 mini | Memilih tool, interpretasi, hipotesis, dan penyusunan claim |
+| LLM provider | Provider OpenAI-compatible dari `.env` (saat ini Groq) | Memilih tool, interpretasi, hipotesis, dan penyusunan claim |
 
 ## 4. Alur ingestion dan analisis
 
@@ -92,7 +92,7 @@ Karakteristik penting:
 - satu baris malformed menggagalkan transaksi parsing file tersebut;
 - `raw_log`, `raw_line_number`, dan `evidence_file_id` tidak boleh diubah setelah event tersimpan;
 - parser version dicatat pada audit log;
-- worker berjalan dengan concurrency `1` untuk mencegah rebuild analysis bersamaan pada case yang sama.
+- worker memakai lock per-case saat rebuild analysis untuk mencegah hasil correlation/finding saling menimpa.
 
 ## 5. Parsing deterministik
 
@@ -309,7 +309,7 @@ Backend dan worker berjalan sebagai user non-root UID `10001`. Secret model diba
 
 ### Prioritas 0 — sebelum dipakai oleh banyak pengguna
 
-1. **Belum ada autentikasi dan otorisasi pengguna.** Mengetahui UUID case cukup untuk mengakses case. Query memang terisolasi per case, tetapi belum ada pemeriksaan kepemilikan atau role.
+1. **Authentication dasar sudah ada, tetapi belum lengkap untuk enterprise.** Session, CSRF, role, dan membership per-case tersedia; MFA, SSO, recovery, serta lifecycle membership belum tersedia.
 2. **Belum benar-benar multi-tenant.** Tidak ada `tenant_id`, row-level security PostgreSQL, atau pemisahan encryption key.
 3. **Token GitHub Models adalah secret global.** Belum ada secret manager, rotasi otomatis, atau provider credential isolation.
 4. **Tidak ada malware-safe file scanning.** Validasi format bukan antivirus. File disimpan dan dibaca sebagai teks, tetapi belum dipindai oleh AV/sandbox.
@@ -317,7 +317,7 @@ Backend dan worker berjalan sebagai user non-root UID `10001`. Secret model diba
 
 ### Prioritas 1 — reliability dan scale
 
-1. **Database migration belum formal.** Startup masih memakai `create_all`/DDL tambahan; sebaiknya menggunakan Alembic dengan revision history.
+1. **Startup masih memiliki legacy bootstrap DDL.** Compose menjalankan Alembic revision history, tetapi `create_all`/DDL kompatibilitas lama di lifespan perlu dipensiunkan melalui migration test fresh database.
 2. **Rebuild analysis masih per case penuh.** Setiap ingestion membaca ulang event case dan membangun ulang correlation/finding. Perlu incremental analysis untuk case besar.
 3. **Worker concurrency satu.** Aman terhadap race pada MVP, tetapi throughput global rendah. Solusi berikutnya adalah locking per case dan concurrency lintas case.
 4. **Parsing file membaca isi ke memory.** Batas 50 MiB membantu, tetapi streaming parser/batched insert lebih aman untuk scale.
@@ -371,3 +371,25 @@ Backend dan worker berjalan sebagai user non-root UID `10001`. Secret model diba
 - [Panduan menambah parser](ADDING_A_PARSER.md)
 - [README proyek](../README.md)
 
+## 16. TraceLens VIGIL
+
+Lapisan agent saat ini menggunakan bounded single-agent VIGIL (*Verified
+Investigation Graph & Evidence Loop*). VIGIL menambahkan kontrak state
+`vigil-state-v2` di `AgentRun.state`, dengan komponen:
+
+- rencana investigasi berversi dan plan-aware tool policy;
+- hypothesis registry dengan status proposed, investigating, supported,
+  weakened, refuted, dan unresolved;
+- epistemic state, evidence gap, alternative explanation, serta bounded next
+  action;
+- pencarian evidence yang berpotensi membantah hypothesis;
+- verifier reason code dan repair loop maksimum yang dikonfigurasi;
+- stop reason terstruktur, provenance edge, case-bounded memory, checkpoint,
+  dan trace operasional yang tidak memuat chain-of-thought.
+
+Execution tetap deterministik pada parser, normalisasi waktu, sorting,
+correlation, detection, dan risk scoring. Tools agent read-only, allowlisted,
+dan terikat pada case aktif. VIGIL membantu investigator menilai bukti; ia
+tidak melakukan containment, tidak menjamin zero hallucination, dan bukan
+forensic-grade formal evidence. Detail state dan evaluasi tersedia di
+[AGENTIC_V2_ARCHITECTURE.md](AGENTIC_V2_ARCHITECTURE.md).

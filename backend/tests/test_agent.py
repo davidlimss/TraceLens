@@ -7,6 +7,7 @@ from app.claim_verifier import INSUFFICIENT_EVIDENCE, verify_claims
 from app.config import Settings
 from app.llm_gateway import LLMGateway, SYSTEM_PROMPT, _compact_tool_messages, wrap_untrusted_data
 from app.main import agent_audit_details
+from app.models import AgentRun, AgentStep
 from app.schemas import AgentClaim, ChatResponse
 
 
@@ -25,6 +26,26 @@ class FakeDB:
             item.agent_run_id = uuid.uuid4()
 
     def flush(self):
+        return None
+
+
+class DurableFakeDB(FakeDB):
+    def __init__(self, valid_ids=()):
+        super().__init__(valid_ids)
+        self.items = []
+        self.commit_count = 0
+
+    def add(self, item):
+        super().add(item)
+        self.items.append(item)
+
+    def commit(self):
+        self.commit_count += 1
+
+    def get(self, model, item_id):
+        return next((item for item in self.items if isinstance(item, model) and getattr(item, "agent_run_id", None) == item_id), None)
+
+    def scalar(self, _statement):
         return None
 
 
@@ -199,3 +220,67 @@ def test_inference_requires_multiple_evidence_reasoning_and_limitations():
     result = verify_claims(FakeDB([first, second]), case_id, {"claims": [claim]})
     assert len(result.claims) == 1
     assert result.claims[0].supporting_evidence_ids == [first, second]
+
+
+def test_agent_checkpoints_model_and_tool_steps_with_run_id():
+    case_id, evidence_id = uuid.uuid4(), uuid.uuid4()
+    db = DurableFakeDB([evidence_id])
+    client = FakeClient([response(json.dumps({
+        "claims": [{"text": "Login gagal.", "status": "fact", "supporting_evidence_ids": [str(evidence_id)]}]
+    }))])
+    result, metrics = LLMGateway(settings(), client).chat(db, case_id, "apa yang terjadi?")
+
+    assert result.agent_run_id == uuid.UUID(metrics["agent_run_id"])
+    assert metrics["tool_calls"] == 0
+    assert db.commit_count >= 2
+    assert any(isinstance(item, AgentRun) and item.status == "complete" for item in db.items)
+    assert any(isinstance(item, AgentStep) and item.step_type == "model" for item in db.items)
+
+
+def test_verifier_guided_repair_is_bounded_and_persisted():
+    case_id, evidence_id = uuid.uuid4(), uuid.uuid4()
+    db = DurableFakeDB([evidence_id])
+    first = {"claims": [{"text": "Login gagal.", "status": "inference",
+                          "supporting_evidence_ids": [str(evidence_id)],
+                          "reasoning_summary": "Satu event", "limitations": ["Data terbatas"]}]}
+    second = {"claims": [{"text": "Login gagal.", "status": "fact",
+                           "supporting_evidence_ids": [str(evidence_id)]}]}
+    client = FakeClient([response(json.dumps(first)), response(json.dumps(second))])
+    result, metrics = LLMGateway(settings(llm_max_repair_attempts=1), client).chat(db, case_id, "apa yang terjadi?")
+
+    assert len(result.claims) == 1
+    assert result.claims[0].verification_status == "repaired"
+    assert result.verification_summary["verified_count"] == 1
+    assert any(isinstance(item, AgentStep) and item.step_type == "repair" for item in db.items)
+    assert metrics["stop_reason"] == "GOAL_SATISFIED"
+
+
+def test_failed_run_can_resume_from_persisted_checkpoint():
+    case_id, evidence_id = uuid.uuid4(), uuid.uuid4()
+    db = DurableFakeDB([evidence_id])
+    failure = [FakeHTTPResponse({}, status_code=500) for _ in range(3)]
+    with __import__('pytest').raises(Exception, match="API request failed"):
+        LLMGateway(settings(), FakeClient(failure)).chat(db, case_id, "apa yang terjadi?")
+    run = next(item for item in db.items if isinstance(item, AgentRun))
+    assert run.status == "failed"
+    resumed, metrics = LLMGateway(settings(), FakeClient([response(json.dumps({
+        "claims": [{"text": "Login gagal.", "status": "fact", "supporting_evidence_ids": [str(evidence_id)]}]
+    }))])).chat(db, case_id, run_id=run.agent_run_id)
+    assert resumed.run_status == "complete"
+    assert metrics["agent_run_id"] == str(run.agent_run_id)
+
+
+def test_unexpected_provider_failure_closes_run_without_leaking_exception():
+    case_id = uuid.uuid4()
+    db = DurableFakeDB()
+
+    class BrokenClient:
+        def post(self, _path, json):
+            raise RuntimeError("secret provider stack trace")
+
+    with __import__('pytest').raises(Exception, match="API request failed"):
+        LLMGateway(settings(), BrokenClient()).chat(db, case_id, "apa yang terjadi?")
+
+    run = next(item for item in db.items if isinstance(item, AgentRun))
+    assert run.status == "failed"
+    assert "secret provider stack trace" not in str(run.stop_reason)

@@ -9,7 +9,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.config import get_settings
 from app.engine import rebuild_case_analysis
-from app.models import AuditLog, Event, EvidenceFile, QuarantinedLine
+from app.models import AgentRun, AuditLog, Event, EvidenceFile, QuarantinedLine
 from app.parsers import detect_format, parse_line
 from app.parsers.base import ParsingError
 from app.parsers.csv_app import parse_csv_app, parse_csv_headers
@@ -134,6 +134,28 @@ def mark_stuck_jobs() -> int:
             db.add(AuditLog(case_id=evidence.case_id, evidence_file_id=evidence.evidence_file_id,
                             action="evidence_parsing_stuck", parser_version=PARSER_VERSION,
                             details={"heartbeat_at": evidence.heartbeat_at.isoformat() if evidence.heartbeat_at else None}))
+        db.commit()
+        return len(rows)
+
+
+@celery_app.task(name="mark_stuck_agent_runs")
+def mark_stuck_agent_runs() -> int:
+    """Fail-closed runs whose worker heartbeat stopped before a checkpoint."""
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=settings.agent_stuck_minutes)
+    with SessionLocal() as db:
+        rows = list(db.scalars(select(AgentRun).where(
+            AgentRun.status == "running", AgentRun.updated_at < cutoff,
+        )))
+        for run in rows:
+            last_checkpoint = run.updated_at
+            run.status = "failed"
+            run.stop_reason = "agent_worker_heartbeat_expired"
+            run.updated_at = datetime.now(timezone.utc)
+            db.add(AuditLog(case_id=run.case_id, action="agent_run_stuck", actor="scheduler",
+                            model_version=run.model_version, prompt_version=run.prompt_version,
+                            details={"agent_run_id": str(run.agent_run_id),
+                                     "last_checkpoint_at": last_checkpoint.isoformat() if last_checkpoint else None,
+                                     "agent_stuck_minutes": settings.agent_stuck_minutes}))
         db.commit()
         return len(rows)
 

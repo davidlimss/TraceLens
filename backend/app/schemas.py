@@ -55,6 +55,9 @@ class EvidenceRead(BaseModel):
 class EventRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     event_id: uuid.UUID
+    evidence_file_id: uuid.UUID | None = None
+    external_evidence_id: uuid.UUID | None = None
+    event_origin: str = "local"
     timestamp_original: str | None
     timestamp_normalized: datetime | None
     timezone: str | None
@@ -71,7 +74,7 @@ class EventRead(BaseModel):
     process_name: str | None
     file_name: str | None
     raw_log: str
-    raw_line_number: int
+    raw_line_number: int | None
     parser_name: str
     parser_confidence: float
     tags: list
@@ -104,6 +107,27 @@ class EventContext(BaseModel):
     event: EventRead
     before: list[EventRead]
     after: list[EventRead]
+
+
+class ExternalEvidenceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    evidence_id: uuid.UUID
+    provider: str
+    source_name: str
+    external_event_id: str
+    timestamp_original: str | None
+    timestamp_normalized: datetime | None
+    raw_log: str
+    raw_line_number: int | None = None
+    content_sha256: str
+    retrieved_at: datetime
+    source_ip: str | None = None
+    username: str | None = None
+    host: str | None = None
+    event_action: str | None = None
+    event_outcome: str | None = None
+    severity: str = "info"
+    tags: list = Field(default_factory=list)
 
 
 class CorrelationRead(BaseModel):
@@ -176,6 +200,7 @@ class ChatRequest(BaseModel):
 
 class AgentClaim(BaseModel):
     claim_id: str | None = None
+    hypothesis_id: str | None = None
     text: str
     status: Literal["fact", "inference", "hypothesis"]
     evidence_id: uuid.UUID
@@ -186,11 +211,69 @@ class AgentClaim(BaseModel):
     reasoning_summary: str | None = None
     limitations: list[str] = Field(default_factory=list)
     required_additional_evidence: list[str] = Field(default_factory=list)
+    verification_status: Literal["verified", "repaired", "rejected"] = "verified"
+    verification_reasons: list[str] = Field(default_factory=list)
 
 
 class ChatResponse(BaseModel):
     answer: str
     claims: list[AgentClaim]
+    agent_run_id: uuid.UUID | None = None
+    run_status: str = "complete"
+    investigation: dict = Field(default_factory=dict)
+    verification_summary: dict = Field(default_factory=dict)
+
+
+class AgentRunRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    agent_run_id: uuid.UUID
+    case_id: uuid.UUID
+    state_version: str
+    status: str
+    question: str
+    current_step: int
+    cancel_requested: bool
+    stop_reason: str | None = None
+    prompt_version: str | None = None
+    model_version: str | None = None
+    graph_version: str
+    state_summary: dict = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+
+
+class AgentStepRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    agent_step_id: uuid.UUID
+    agent_run_id: uuid.UUID
+    step_number: int
+    step_type: str
+    name: str
+    status: str
+    input_data: dict
+    output_data: dict
+    evidence_ids: list = Field(default_factory=list)
+    error_code: str | None = None
+    started_at: datetime
+    ended_at: datetime | None = None
+    latency_ms: int | None = None
+
+
+class EvidenceLedgerRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    ledger_id: uuid.UUID
+    agent_run_id: uuid.UUID
+    evidence_id: uuid.UUID
+    evidence_kind: str
+    source_tool: str
+    reference_count: int
+    details: dict
+    first_seen_at: datetime
+    last_seen_at: datetime
+
+
+class ReplayRequest(BaseModel):
+    mode: Literal["deterministic_trace", "model_re_evaluation"] = "deterministic_trace"
 
 
 class ReportExportRequest(BaseModel):

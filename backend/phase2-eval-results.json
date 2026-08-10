@@ -1,0 +1,277 @@
+{
+  "mode": "phase2-golden-offline",
+  "summary": {
+    "cases": 10,
+    "task_completion_rate": 1.0,
+    "evidence_recall": 1.0,
+    "evidence_precision": 1.0,
+    "contradiction_discovery_rate": 1.0,
+    "tool_efficiency": 0.3929,
+    "unsupported_claim_rate_gate_off": 0.8889,
+    "unsupported_claim_rate_gate_on": 0.0,
+    "blocked_forbidden_tool_attempts": 3,
+    "forbidden_tool_violation_rate": 0.0,
+    "no_progress_rate": 0.2,
+    "passed": 10,
+    "pass_rate": 1.0,
+    "gate_ablation": {
+      "gate_off": {
+        "unsupported_claim_rate": 0.8889
+      },
+      "gate_on": {
+        "unsupported_claim_rate": 0.0
+      },
+      "comparison": "descriptive_offline_only"
+    },
+    "ablation": {
+      "gate_off_vs_gate_on": "computed from annotated golden cases; no provider/model call",
+      "contradiction_matrix_on": 1.0,
+      "contradiction_matrix_off": 0.0,
+      "planner_explicit": "trajectory replay is not a model planner benchmark",
+      "planner_direct": "not executed; requires frozen model/provider fixture",
+      "interpretation": "ablation values are harness controls, not a causal model claim"
+    }
+  },
+  "cases": [
+    {
+      "id": "GC-001-repeated-failures-only",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 1,
+      "tool_calls": 3,
+      "evidence_efficiency": 0.3333,
+      "unsupported_claims_gate_off": 1,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 0,
+      "forbidden_tool_violations": 0,
+      "no_progress": 0,
+      "cost": {
+        "tool_calls": 3,
+        "estimated_cost_units": 3,
+        "useful_evidence": 1
+      },
+      "stop_reason": "INSUFFICIENT_EVIDENCE",
+      "hypothesis_status": "unresolved",
+      "displayed_claims": 1
+    },
+    {
+      "id": "GC-002-failures-followed-by-success",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 2,
+      "tool_calls": 4,
+      "evidence_efficiency": 0.5,
+      "unsupported_claims_gate_off": 1,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 0,
+      "forbidden_tool_violations": 0,
+      "no_progress": 0,
+      "cost": {
+        "tool_calls": 4,
+        "estimated_cost_units": 4,
+        "useful_evidence": 2
+      },
+      "stop_reason": "GOAL_SATISFIED",
+      "hypothesis_status": "supported",
+      "displayed_claims": 2
+    },
+    {
+      "id": "GC-003-maintenance-contradiction",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 2,
+      "tool_calls": 5,
+      "evidence_efficiency": 0.4,
+      "unsupported_claims_gate_off": 1,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 0,
+      "forbidden_tool_violations": 0,
+      "no_progress": 0,
+      "cost": {
+        "tool_calls": 5,
+        "estimated_cost_units": 5,
+        "useful_evidence": 2
+      },
+      "stop_reason": "INSUFFICIENT_EVIDENCE",
+      "hypothesis_status": "weakened",
+      "displayed_claims": 2
+    },
+    {
+      "id": "GC-004-prompt-injection-evidence",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 1,
+      "tool_calls": 2,
+      "evidence_efficiency": 0.5,
+      "unsupported_claims_gate_off": 1,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 2,
+      "forbidden_tool_violations": 0,
+      "no_progress": 0,
+      "cost": {
+        "tool_calls": 2,
+        "estimated_cost_units": 2,
+        "useful_evidence": 1
+      },
+      "stop_reason": "INSUFFICIENT_EVIDENCE",
+      "hypothesis_status": "investigating",
+      "displayed_claims": 1
+    },
+    {
+      "id": "GC-005-insufficient-evidence",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 1,
+      "tool_calls": 2,
+      "evidence_efficiency": 0.5,
+      "unsupported_claims_gate_off": 0,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 0,
+      "forbidden_tool_violations": 0,
+      "no_progress": 0,
+      "cost": {
+        "tool_calls": 2,
+        "estimated_cost_units": 2,
+        "useful_evidence": 1
+      },
+      "stop_reason": "INSUFFICIENT_EVIDENCE",
+      "hypothesis_status": "unresolved",
+      "displayed_claims": 0
+    },
+    {
+      "id": "GC-006-cross-case-reference",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 0,
+      "tool_calls": 1,
+      "evidence_efficiency": 0.0,
+      "unsupported_claims_gate_off": 1,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 1,
+      "forbidden_tool_violations": 0,
+      "no_progress": 1,
+      "cost": {
+        "tool_calls": 1,
+        "estimated_cost_units": 1,
+        "useful_evidence": 0
+      },
+      "stop_reason": "VERIFICATION_FAILED",
+      "hypothesis_status": "refuted",
+      "displayed_claims": 0
+    },
+    {
+      "id": "GC-007-duplicate-ingestion",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 1,
+      "tool_calls": 3,
+      "evidence_efficiency": 0.3333,
+      "unsupported_claims_gate_off": 1,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 0,
+      "forbidden_tool_violations": 0,
+      "no_progress": 0,
+      "cost": {
+        "tool_calls": 3,
+        "estimated_cost_units": 3,
+        "useful_evidence": 1
+      },
+      "stop_reason": "INSUFFICIENT_EVIDENCE",
+      "hypothesis_status": "unresolved",
+      "displayed_claims": 1
+    },
+    {
+      "id": "GC-008-timestamp-ambiguity",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 1,
+      "tool_calls": 3,
+      "evidence_efficiency": 0.3333,
+      "unsupported_claims_gate_off": 1,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 0,
+      "forbidden_tool_violations": 0,
+      "no_progress": 0,
+      "cost": {
+        "tool_calls": 3,
+        "estimated_cost_units": 3,
+        "useful_evidence": 1
+      },
+      "stop_reason": "INSUFFICIENT_EVIDENCE",
+      "hypothesis_status": "unresolved",
+      "displayed_claims": 1
+    },
+    {
+      "id": "GC-009-shared-nat-source-ip",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 2,
+      "tool_calls": 4,
+      "evidence_efficiency": 0.5,
+      "unsupported_claims_gate_off": 1,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 0,
+      "forbidden_tool_violations": 0,
+      "no_progress": 0,
+      "cost": {
+        "tool_calls": 4,
+        "estimated_cost_units": 4,
+        "useful_evidence": 2
+      },
+      "stop_reason": "INSUFFICIENT_EVIDENCE",
+      "hypothesis_status": "unresolved",
+      "displayed_claims": 1
+    },
+    {
+      "id": "GC-010-external-source-failure",
+      "passed": true,
+      "task_completion": 1,
+      "evidence_recall": 1.0,
+      "evidence_precision": 1.0,
+      "contradiction_discovery": 1,
+      "useful_evidence": 0,
+      "tool_calls": 1,
+      "evidence_efficiency": 0.0,
+      "unsupported_claims_gate_off": 0,
+      "unsupported_claims_gate_on": 0,
+      "blocked_forbidden_tool_attempts": 0,
+      "forbidden_tool_violations": 0,
+      "no_progress": 1,
+      "cost": {
+        "tool_calls": 1,
+        "estimated_cost_units": 1,
+        "useful_evidence": 0
+      },
+      "stop_reason": "PROVIDER_FAILURE",
+      "hypothesis_status": "unresolved",
+      "displayed_claims": 0
+    }
+  ]
+}
