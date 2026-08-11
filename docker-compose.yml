@@ -96,6 +96,7 @@ services:
 
   backend:
     build: ./backend
+    image: loginvestigator-x-backend:latest
     command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment: *backend-environment
     ports:
