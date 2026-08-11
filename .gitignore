@@ -6,3 +6,11 @@ __pycache__/
 backend/storage/
 frontend/node_modules/
 frontend/.next/
+
+# Local academic proposal/research working documents are not product source.
+docs/ANALISIS_PROJECT_PROPOSAL.md
+docs/BLUEPRINT_PROPOSAL_TRACELES_AI.md
+docs/DRAFT_PROPOSAL_TRACELES_AI.md
+docs/LITERATURE_SEARCH_LOG.md
+docs/MATRIKS_PENELITIAN_TERKAIT.md
+docs/VALIDASI_FOKUS_PENELITIAN.md
