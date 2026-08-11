@@ -424,7 +424,5 @@ Klaim yang tidak boleh digunakan:
 ## 15. Referensi implementasi
 
 - [Arsitektur teknis](TRACELENS_ARSITEKTUR_TEKNIS_ID.md)
-- [Technical review VIGIL](AGENTIC_AI_TECHNICAL_REVIEW_ID.md)
-- [Phase 2 implementation report](VIGIL_PHASE2_IMPLEMENTATION_REPORT_ID.md)
 - [Threat model](THREAT_MODEL.md)
 - [Agentic V2 architecture](AGENTIC_V2_ARCHITECTURE.md)

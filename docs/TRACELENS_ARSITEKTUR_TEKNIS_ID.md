@@ -443,10 +443,8 @@ stop state. Nilai quality bukan probabilitas serangan.
 Setiap run selesai disnapshot dengan hash kanonik. Endpoint deterministic replay
 tidak memanggil model; model re-evaluation belum diaktifkan karena memerlukan
 provider fixture yang dibekukan. Run diff bersifat deskriptif dan tidak memilih
-run yang lebih benar secara otomatis. Evaluasi Phase 2 menggunakan sepuluh
-golden case, adversarial policy/envelope smoke test, dan metrik gate-off/on
-yang diberi label offline. Hasil evaluasi dan batasnya dijelaskan pada
-`docs/VIGIL_PHASE2_IMPLEMENTATION_REPORT_ID.md`.
+run yang lebih benar secara otomatis. Evaluasi offline disimpan bersama fixture
+dan test di `backend/evals/`, sehingga dapat direproduksi tanpa provider live.
 
 ### 14. Review arsitektur terbaru
 

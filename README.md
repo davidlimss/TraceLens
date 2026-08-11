@@ -13,14 +13,35 @@ TraceLens mengubah log mentah heterogen menjadi event ternormalisasi, timeline d
 
 ## Status proyek
 
-TraceLens saat ini berada pada tahap **alpha untuk riset dan engineering**. Repository ini memiliki baseline berorientasi production, tetapi belum tersertifikasi untuk penggunaan production tanpa pengawasan.
+TraceLens saat ini berada pada tahap **production-oriented beta foundation untuk riset, demo, dan validasi engineering**. Alur read-only sudah dapat dijalankan end-to-end, tetapi repository ini belum menjadi layanan enterprise, belum forensic-grade, dan belum boleh dipakai tanpa pengawasan investigator.
 
 | Area | Kondisi saat ini |
 |---|---|
-| Scope produk | Masih dalam pengembangan |
-| Quality | CI otomatis dan validasi lokal |
-| Production readiness | Bersyarat; masih ada gap |
-| Release | Proses terdokumentasi berorientasi SemVer |
+| Scope produk | Investigasi log berbasis case, read-only |
+| Quality | CI otomatis, test parser/engine/security/agent, evaluation offline |
+| Production readiness | Bersyarat; deployment gate masih wajib dipenuhi |
+| Release | Branch, pull request, migration, changelog, dan CI gate |
+
+## Latar belakang dan tujuan
+
+Log keamanan biasanya datang dari banyak format, memiliki timezone yang tidak
+seragam, dan sulit dibaca sebagai satu kronologi. Investigator perlu menjaga
+raw evidence, menggabungkan event dari beberapa sumber, memahami korelasi IP
+atau user, lalu membedakan fakta dari dugaan. Kesalahan pada tahap tersebut
+dapat menghasilkan false positive, false negative, atau kesimpulan AI yang
+tidak dapat ditelusuri.
+
+TraceLens dibangun untuk membantu investigator menjawab tiga pertanyaan inti:
+
+1. Apa urutan kejadian yang dapat dibuktikan dari log?
+2. Event, IP, user, atau session mana yang saling berkaitan?
+3. Bukti apa yang masih kurang sebelum sebuah hipotesis dapat dipercaya?
+
+Tujuan engineering-nya adalah memisahkan pekerjaan objektif dari pekerjaan
+bahasa. Parsing, timestamp normalization, sorting, correlation, detection,
+dan risk scoring dikerjakan secara deterministik. AI hanya merencanakan
+pencarian, memilih tool read-only, membandingkan bukti, dan menyusun claim yang
+kemudian diverifikasi backend.
 
 ## Prinsip utama
 
@@ -65,6 +86,18 @@ Deteksi format berbasis isi file. Extension hanya menjadi salah satu sinyal vali
 
 EVTX binary, PCAP, archive terkompresi, live SIEM streaming, dan tailing real-time belum didukung secara native. Export sumber tersebut terlebih dahulu ke JSON, JSONL, CSV, atau text.
 
+### Di luar scope
+
+TraceLens tidak melakukan active response, tidak mengeksekusi command pada
+host, tidak memblokir IP, tidak menonaktifkan akun, dan tidak mengambil
+keputusan containment otomatis. Konektor OpenSearch, Splunk, dan Wazuh bersifat
+read-only. TraceLens juga bukan pengganti SIEM, SOC analyst, atau prosedur
+forensik formal.
+
+Format yang belum mempunyai parser deterministik tidak boleh dipresentasikan
+sebagai format yang didukung hanya karena file tersebut ber-extension `.json`
+atau `.txt`.
+
 ## Arsitektur
 
 ```text
@@ -92,6 +125,21 @@ FastAPI backend :8002 ----> PostgreSQL
          -> MCP adapter -> immutable external_evidence snapshot
 ```
 
+### Peta ownership kode
+
+| Area perubahan | File utama | Bukti wajib sebelum PR |
+|---|---|---|
+| Parser | `backend/app/parsers/` | Test event valid, malformed, missing field, timestamp ambiguity |
+| Analysis | `backend/app/engine.py` | Test timeline, correlation, detection, risk, golden case |
+| API/security | `backend/app/main.py`, `auth.py`, `security.py` | Authorization, CSRF, upload, rate-limit regression |
+| Agent | `backend/app/vigil.py`, `vigil_policy.py`, `llm_gateway.py` | Claim gate, prompt injection, budget, stop, replay |
+| Database | `backend/alembic/`, `models.py` | Forward migration, downgrade, readiness, immutability |
+| Frontend | `frontend/app/`, `frontend/lib/` | Typecheck, build, loading/error/empty state |
+| Deployment | `docker-compose*.yml`, `.github/workflows/` | Compose config, image scan, secret scan, smoke |
+
+File `.env` dan data evidence lokal tidak pernah menjadi bagian repository.
+Sample di `samples/` hanya berisi log aman untuk demo dan test.
+
 | Layer | Teknologi |
 |---|---|
 | Frontend | Next.js, React, TypeScript, Tailwind CSS |
@@ -105,6 +153,23 @@ FastAPI backend :8002 ----> PostgreSQL
 | Monitoring | Prometheus metrics dan SLO rules |
 
 Lihat [ARCHITECTURE.md](ARCHITECTURE.md) dan [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) untuk desain detail.
+
+### Batas tanggung jawab komponen
+
+| Komponen | Sumber kebenaran | Tidak boleh dilakukan |
+|---|---|---|
+| Next.js UI | State tampilan dan input investigator | Menghitung finding atau mengubah evidence |
+| FastAPI case boundary | Auth, membership, API, audit, orchestration | Melewati authorization case |
+| PostgreSQL | Case, event, finding, run, audit | Menyimpan raw event yang dapat ditimpa |
+| Celery worker | Parsing dan analysis asynchronous | Memanggil LLM untuk parsing |
+| VIGIL supervisor | Plan, state, budget, stop, repair | Menjalankan write action |
+| Tool policy/MCP | Tool read-only yang allowlisted | Arbitrary SQL, DSL, credential, atau command |
+| Claim verifier | Claim yang boleh ditampilkan | Menerima citation lintas case |
+
+Alur agentiknya adalah `goal -> plan -> tool read-only -> observation tidak
+tepercaya -> evidence ledger -> hypothesis/gap -> claim -> verification ->
+answer atau abstention`. Karena itu TraceLens adalah bounded single-agent,
+bukan multi-agent kosmetik dan bukan autonomous-response platform.
 
 ## Struktur repository
 
@@ -193,6 +258,19 @@ Buka:
 - Health: http://localhost:8002/health
 - Readiness: http://localhost:8002/ready
 
+Port frontend `3002` juga diizinkan untuk development. Ini berguna jika
+`3001` dipakai service lain:
+
+```powershell
+$env:FRONTEND_PORT="3002"
+docker compose up -d --build
+Start-Process http://localhost:3002
+```
+
+`CORS_ORIGINS` pada `.env.example` telah memuat `3001` dan `3002`. Pada
+deployment selain localhost, ganti dengan origin frontend yang sebenarnya dan
+jangan menggunakan wildcard.
+
 Ikuti log:
 
 ```bash
@@ -214,9 +292,9 @@ TLS/WAF, storage, dan backup sudah disiapkan:
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
-Checklist penerimaan ada di [`docs/PRODUCT_ACCEPTANCE_CHECKLIST_ID.md`](docs/PRODUCT_ACCEPTANCE_CHECKLIST_ID.md),
-sedangkan definisi target 10/10 ada di
-[`docs/PRODUCTIZATION_10_10_ID.md`](docs/PRODUCTIZATION_10_10_ID.md).
+Gate deployment dan checklist operasional dirangkum di
+[`docs/PRODUCTION_READINESS.md`](docs/PRODUCTION_READINESS.md) dan
+[`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md).
 
 ## Alur investigasi
 
@@ -340,7 +418,7 @@ Baca [SECURITY.md](SECURITY.md) dan [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
 | `BACKEND_PORT` | `8002` | Port backend pada host |
 | `FRONTEND_PORT` | `3001` | Port frontend pada host |
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8002` | URL API browser |
-| `CORS_ORIGINS` | `http://localhost:3001` | Origin frontend yang diizinkan |
+| `CORS_ORIGINS` | `http://localhost:3001,http://localhost:3002` | Origin frontend development yang diizinkan |
 | `SERVER_TIMEZONE` | `Asia/Jakarta` | Fallback timezone |
 | `LLM_PROVIDER` | `groq` | Provider hosted yang dipakai agent |
 | `LLM_API_KEY` | kosong | API key provider; jangan commit |
@@ -359,6 +437,26 @@ Baca [SECURITY.md](SECURITY.md) dan [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md)
 
 Lihat [.env.example](.env.example) untuk daftar lengkap.
 
+## API utama
+
+Semua endpoint case memeriksa session, CSRF untuk mutation, membership, dan
+scope `case_id`. Model tidak dapat mengganti case aktif melalui tool.
+
+| Kelompok | Endpoint | Fungsi |
+|---|---|---|
+| Auth | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` | Session server-side dan CSRF |
+| Case | `POST /cases` | Membuat workspace investigasi |
+| Evidence | `POST /cases/{id}/logs`, `GET /cases/{id}/logs` | Upload dan status parsing |
+| Analysis | `GET /cases/{id}/events`, `/timeline`, `/entities`, `/findings` | Query hasil deterministik |
+| Agent | `POST /cases/{id}/chat` | Investigasi AI bounded dan terverifikasi |
+| Agent trace | `GET /cases/{id}/agent-runs/{run_id}` | Plan, steps, ledger, stop state |
+| Report | `POST /cases/{id}/exports` | Export Markdown/PDF dengan evidence reference |
+| System | `GET /health`, `GET /ready`, `GET /metrics` | Liveness, readiness, dan Prometheus |
+
+Swagger tersedia pada `http://localhost:8002/docs`. Raw evidence tidak boleh
+dianggap sebagai instruksi; data tool dibungkus sebagai untrusted data sebelum
+diteruskan ke provider.
+
 ## Validasi dan testing
 
 ```bash
@@ -373,6 +471,21 @@ Pada Windows, jalankan validasi lengkap:
 ```powershell
 .\scripts\validate.ps1
 ```
+
+Validation gate yang saat ini dipakai:
+
+- 82 backend test lulus pada container Python 3.12;
+- VIGIL golden evaluation 10/10 dan adversarial policy/envelope smoke 11/11;
+- detection golden set internal 6/6 dengan precision, recall, dan F1 1.0;
+- frontend typecheck, production build, dan `npm audit` lulus;
+- `pip-audit`, Trivy image scan, dan Gitleaks secret scan lulus di GitHub CI;
+- Docker Compose development dan production overlay berhasil divalidasi;
+- runtime smoke berhasil: login, create case, upload, parsing, event, finding;
+- load smoke lokal 200 request dengan 20 concurrency mencapai success rate 100%.
+
+Angka tersebut adalah bukti regression dan smoke path repository, bukan klaim
+generalisasi pada corpus SOC besar, availability bulanan, atau hasil red-team
+independen. Evaluation agent offline tidak memanggil provider model live.
 
 ## Baseline production
 
@@ -427,6 +540,47 @@ docker compose logs --tail 200 worker redis
 
 Jangan gunakan TraceLens sebagai satu-satunya dasar kesimpulan hukum, attribution penyerang, atau respons insiden berdampak tinggi tanpa validasi manusia yang kompeten.
 
+## Manajemen repository dan governance
+
+Repository dikelola sebagai proyek engineering, bukan kumpulan notebook:
+
+1. `main` adalah baseline yang harus selalu dapat dibangun.
+2. Perubahan dibuat pada branch fokus seperti `feat/...`, `fix/...`,
+   `security/...`, atau `chore/...`.
+3. Setiap perubahan masuk melalui pull request; commit harus menjelaskan satu
+   tujuan dan tidak boleh membawa `.env`, credential, database dump, atau log
+   sensitif.
+4. CI wajib menjalankan test backend, evaluation, frontend build/typecheck,
+   dependency audit, image scan, dan secret scan.
+5. Perubahan schema wajib memakai Alembic migration dan menaikkan
+   `SCHEMA_REVISION`; startup production menolak schema yang tidak sesuai.
+6. Perubahan parser, detection, risk, prompt, model, atau agent graph harus
+   memperbarui versi, test, evaluation, dan catatan changelog.
+7. Perubahan security-sensitive memerlukan review kedua dan penjelasan
+   rollback/recovery.
+8. Release mengikuti SemVer dan checklist pada
+   [`CONTRIBUTING.md`](CONTRIBUTING.md), [`CHANGELOG.md`](CHANGELOG.md), dan
+   [`docs/RELEASE_PROCESS.md`](docs/RELEASE_PROCESS.md).
+
+### Definition of done
+
+Sebuah fitur dianggap selesai bila acceptance criteria, test regresi,
+authorization, evidence provenance, observability, dokumentasi, dan jalur
+rollback/recovery-nya telah diperiksa. “Berhasil build” saja tidak cukup untuk
+perubahan yang menyentuh evidence atau AI claim.
+
+### Cara membaca repository untuk evaluasi
+
+- Mulai dari README ini untuk konteks, tujuan, batasan, dan cara menjalankan.
+- Baca [`ARCHITECTURE.md`](ARCHITECTURE.md) untuk system context dan trust boundary.
+- Baca [`docs/TRACELENS_ARSITEKTUR_TEKNIS_ID.md`](docs/TRACELENS_ARSITEKTUR_TEKNIS_ID.md)
+  untuk desain komponen dan data flow.
+- Baca [`docs/TRACELENS_AGENT_PROMPTS_ID.md`](docs/TRACELENS_AGENT_PROMPTS_ID.md)
+  untuk kontrak prompt dan structured claim.
+- Baca [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) untuk threat dan kontrol.
+- Jalankan `scripts/validate.ps1` dan lihat workflow CI untuk bukti yang dapat
+  direproduksi.
+
 ## Dokumentasi
 
 - [Arsitektur](ARCHITECTURE.md)
@@ -436,16 +590,16 @@ Jangan gunakan TraceLens sebagai satu-satunya dasar kesimpulan hukum, attributio
 - [Threat model](docs/THREAT_MODEL.md)
 - [Dokumentasi arsitektur teknis](docs/TRACELENS_ARSITEKTUR_TEKNIS_ID.md)
 - [Dokumentasi prompt agent VIGIL](docs/TRACELENS_AGENT_PROMPTS_ID.md)
+- [Arsitektur agent VIGIL](docs/AGENTIC_V2_ARCHITECTURE.md)
+- [Integrasi MCP external read-only](docs/EXTERNAL_MCP_INTEGRATION_ID.md)
 - [Production readiness](docs/PRODUCTION_READINESS.md)
-- [Build validation report](docs/BUILD_VALIDATION_REPORT.md)
-- [Implementation report](docs/IMPLEMENTATION_REPORT.md)
-- [Project charter](docs/PROJECT_CHARTER.md)
 - [Roadmap](docs/ROADMAP.md)
-- [RAID register](docs/RAID.md)
-- [Decision log](docs/DECISIONS.md)
 - [Release process](docs/RELEASE_PROCESS.md)
 - [Changelog](CHANGELOG.md)
 - [Support guide](SUPPORT.md)
+
+Dokumen proposal, paper, literature review, dan PDF presentasi tidak menjadi
+dependency aplikasi dan sengaja tidak termasuk dalam code PR ini.
 
 ## Kontribusi
 

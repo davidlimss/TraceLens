@@ -3,11 +3,12 @@
 > **Addendum productization — 9 Agustus 2026**
 >
 > Baseline dokumen di bawah ini adalah laporan historis fase MVP. Pada fase
-> productization, schema resmi telah dinaikkan ke `0006_production_hardening`;
+> productization, schema resmi telah dinaikkan ke `0007_vigil_replay_snapshots`;
 > API tidak lagi melakukan DDL saat startup, readiness memeriksa PostgreSQL,
 > Redis, dan evidence storage, login memiliki rate limit, dan response header
-> keamanan/request ID sudah aktif. Validasi terbaru: backend **76 passed**,
-> VIGIL evaluation **6/6**, detection golden evaluation **6/6**, frontend
+> keamanan/request ID sudah aktif. Validasi terbaru: backend **82 passed**,
+> VIGIL golden evaluation **10/10**, adversarial policy/envelope smoke
+> **11/11**, detection golden evaluation **6/6**, frontend
 > typecheck/build **passed**, dan Docker production build **passed**.
 >
 > Status jujur tetap **production-oriented beta foundation**. TLS/WAF, secret
