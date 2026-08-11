@@ -202,6 +202,216 @@ Structured response:
 
 Backend memeriksa evidence existence, active-case ownership, claim status, minimum support untuk inference/hypothesis, entity consistency, count consistency, limitations, dan overclaim seperti compromise atau attribution. Jawaban final dibangun ulang dari claims yang lolos.
 
+#### Struktur runtime agentic VIGIL
+
+VIGIL (*Verified Investigation Graph & Evidence Loop*) adalah supervisor
+single-agent yang mengatur model, tools, state, evidence, dan verifier. Model
+tidak menjadi sumber kebenaran tunggal. Model hanya mengusulkan langkah; policy
+dan executor backend yang mengizinkan serta menjalankan langkah tersebut.
+
+```text
+                         +----------------------+
+                         | Investigator question|
+                         +----------+-----------+
+                                    |
+                                    v
+                         +----------------------+
+                         | FastAPI case boundary|
+                         | auth, membership,    |
+                         | active case, audit   |
+                         +----------+-----------+
+                                    |
+                                    v
+                 +----------------+----------------+
+                 |       VIGIL Supervisor           |
+                 | goal + plan + lifecycle + state   |
+                 +--------+---------------+-----------+
+                          |               |
+                  policy check       LLM gateway
+                          |               |
+                          v               v
+                 +--------+-------+  +----+---------+
+                 | Tool Policy    |  | Model         |
+                 | allowlist,     |  | tool choice,  |
+                 | case scope,    |  | hypothesis,   |
+                 | budget, state  |  | structured JSON|
+                 +--------+-------+  +----+---------+
+                          |               |
+                          +-------+-------+
+                                  v
+                         +----------------------+
+                         | ToolRegistry          |
+                         | local DB tools / MCP  |
+                         | read-only executor    |
+                         +----------+-----------+
+                                    |
+                                    v
+                         +----------------------+
+                         | Observation envelope |
+                         | untrusted data,       |
+                         | redaction, truncation |
+                         +----------+-----------+
+                                    |
+                                    v
+                         +----------------------+
+                         | State + evidence      |
+                         | ledger + provenance   |
+                         | gap + hypothesis      |
+                         +----------+-----------+
+                                    |
+                         +----------+----------+
+                         |                     |
+                         v                     v
+                  next action/replan    Claim Verification Gate
+                                               |
+                              +----------------+----------------+
+                              |                                 |
+                              v                                 v
+                     verified claims                  repair <= 2 / abstain
+                              |                                 |
+                              +----------------+----------------+
+                                               v
+                                      answer + audit + stop state
+```
+
+#### Komponen dan tanggung jawab agent
+
+| Komponen | Implementasi | Tanggung jawab |
+|---|---|---|
+| Goal boundary | FastAPI `case_id` dan `AgentRun.question` | Mengikat pertanyaan ke case aktif dan membership investigator |
+| Plan/state | `backend/app/vigil.py` | Membuat plan, hypothesis, evidence gap, next action, provenance, dan stop state |
+| Policy engine | `backend/app/vigil_policy.py` | Memvalidasi lifecycle transition, tool allowlist, budget, repetition, replan, repair, dan stop |
+| Model gateway | `backend/app/llm_gateway.py` | Mengirim policy/state terpilih ke model, menjalankan loop, retry terbatas, checkpoint, dan redaction |
+| Tool executor | `backend/app/agent_tools.py` | Menjalankan query case-scoped yang terstruktur; tidak menerima arbitrary SQL/DSL/command |
+| External adapter | `external_sources.py`, `mcp_server.py` | Mencari telemetry OpenSearch/Splunk/Wazuh secara read-only dan membuat snapshot lokal |
+| Observation boundary | untrusted data envelope | Memisahkan data log dari instruksi system dan menandai prompt-injection signal |
+| Evidence ledger | `AgentStep`, `EvidenceLedger`, `external_evidence` | Mencatat evidence yang benar-benar diamati dan asal provenance-nya |
+| Claim verifier | `backend/app/claim_verifier.py` | Menolak claim invalid, unsupported, lintas case, atau terlalu kuat |
+| Replay | `backend/app/replay.py` | Membuat snapshot run dan replay deterministik tanpa memanggil model |
+
+#### Lifecycle agent
+
+State machine VIGIL menggunakan state berikut:
+
+```text
+INITIALIZED
+    -> PLANNING
+    -> INVESTIGATING
+    -> EVIDENCE_REVIEW
+    -> VERIFYING
+    -> COMPLETED       (claim lolos)
+    -> ABSTAINED       (bukti tidak cukup)
+    -> FAILED          (provider/runtime failure)
+
+INVESTIGATING <-> EVIDENCE_REVIEW
+VERIFYING -> REPAIRING -> INVESTIGATING
+INVESTIGATING/VERIFYING -> PAUSED -> INVESTIGATING
+INVESTIGATING/VERIFYING -> CANCELLED
+```
+
+State terminal tidak dapat berjalan kembali secara normal. Resume hanya
+diizinkan dari run `paused` atau `failed`, lalu state dipulihkan dari checkpoint
+terakhir. Setiap transisi menyimpan alasan, timestamp, versi state machine, dan
+history sehingga investigator dapat memahami mengapa run berhenti.
+
+#### Siklus model--tool--observation--state
+
+1. **Initialize goal.** Backend membuat `AgentRun` dengan `case_id`, question,
+   prompt version, model version, graph version, dan state schema.
+2. **Create plan.** `create_investigation_plan()` membuat step deterministik
+   berdasarkan fokus pertanyaan, misalnya authentication, timeline,
+   correlation, disconfirming evidence, dan verification. Model boleh
+   mengusulkan revisi, tetapi maksimal tiga revisi dan hanya memakai tool yang
+   ada di allowlist.
+3. **Select action.** Model melihat system policy, public state summary, plan
+   step, dan tool schema. Model memilih tool; model tidak mengirim SQL atau
+   koneksi database.
+4. **Authorize action.** `InvestigationPolicy` memeriksa current state, active
+   case, nama tool, jumlah call, pengulangan, precondition, dan remaining
+   budget. Operasi ilegal ditolak sebelum executor berjalan.
+5. **Execute tool.** `ToolRegistry` mengambil event, timeline, correlation,
+   raw evidence, summary, atau external snapshot dari database secara
+   deterministik. Maksimal row dan window dibatasi.
+6. **Observe safely.** Hasil dibungkus sebagai data tidak tepercaya, dipotong
+   jika terlalu besar, secret di-redact, dan prompt-injection pattern hanya
+   menjadi signal keamanan—bukan instruksi yang harus diikuti.
+7. **Update state.** Evidence ID yang diamati masuk ledger. State memperbarui
+   hypothesis, evidence quality, contradiction matrix, gap, provenance edge,
+   progress, cost, dan next action.
+8. **Replan atau lanjut.** Jika gap belum terjawab, agent dapat memilih tool
+   berikutnya. Jika hypothesis suspicious belum diuji, policy mengarahkan
+   `search_disconfirming_evidence` untuk mencari maintenance, scanner, atau
+   alternatif benign.
+9. **Draft claim.** Model mengembalikan JSON yang berisi answer, claims,
+   hypotheses, limitations, required additional evidence, dan stop reason.
+10. **Verify and repair.** Backend memeriksa setiap kalimat sebagai unit
+    claim. Claim yang repairable dapat meminta evidence tambahan atau downgrade
+    maksimal dua kali. Tidak ada claim yang langsung ditampilkan sebelum gate.
+11. **Stop.** Run menjadi completed bila claim terverifikasi, abstained bila
+    bukti tidak cukup, atau failed/paused/cancelled sesuai kondisi runtime.
+
+#### Isi durable state `vigil-state-v2`
+
+```text
+AgentRun.state
+├── lifecycle + transition_history
+├── investigation_goal + open_questions
+├── plan + revision_history
+├── hypotheses + hypothesis_competition
+├── epistemic_state
+│   ├── confirmed_facts
+│   ├── active_hypotheses / rejected_hypotheses
+│   ├── unknowns / alternative_explanations
+│   └── evidence_gaps / observed_evidence_ids
+├── case_memory (case_id scoped)
+├── provenance edges
+├── collected_evidence_ids + action_history
+├── candidate_actions + action_ranking
+├── repair_state + verification_summary
+├── cost_accounting + remaining_tool_budget
+└── stop_state + reason
+```
+
+State ini bukan chain-of-thought. Ia adalah state operasional yang dibutuhkan
+untuk audit, pause/resume, deterministic replay, dan evaluasi trajectory.
+
+#### Batas kerja LLM dan backend
+
+| LLM/model | Backend deterministik |
+|---|---|
+| Memilih tool dan urutan pencarian | Menentukan parser, canonical event, timestamp, timeline, correlation, detection, dan risk |
+| Mengusulkan hypothesis dan alternatif | Mengikat semua query ke case aktif |
+| Menginterpretasikan observation terstruktur | Mengizinkan/menolak lifecycle dan tool call |
+| Menyusun fact, inference, atau hypothesis | Memvalidasi UUID evidence, ownership, entity, count, semantic support, dan limitation |
+| Mengusulkan replan atau stop | Menyimpan state, ledger, audit, hash, checkpoint, dan stop reason |
+
+Artinya, agentic autonomy berada pada **pemilihan langkah investigasi dan
+adaptasi terhadap evidence**, bukan pada perubahan sistem eksternal. TraceLens
+tetap single-agent karena scope-nya adalah investigasi read-only yang dapat
+direplay; menambah banyak agent tidak otomatis membuat reasoning lebih benar.
+
+#### Contoh trajectory konkret
+
+Pertanyaan investigator: *"Apakah ada login sukses setelah rentetan login
+gagal dari IP yang sama?"*
+
+```text
+1. Plan: authentication -> timeline -> correlation -> disconfirm -> verify
+2. search_events: ambil failure/success, source_ip, username, timestamp
+3. build_timeline: ambil urutan stabil dari database
+4. correlate_entities: ambil relasi source_ip dan alasan window waktu
+5. get_surrounding_events/get_raw_evidence: cocokkan raw line sumber
+6. search_disconfirming_evidence: cari maintenance/scanner/benign context
+7. Draft claim: fact/inference/hypothesis dengan evidence UUID
+8. Verifier: terima, downgrade, repair, atau tolak claim
+9. Stop: GOAL_SATISFIED atau INSUFFICIENT_EVIDENCE
+```
+
+Pada trajectory ini LLM tidak menghitung apakah lima event benar-benar berada
+di window sepuluh menit; engine correlation yang menghitungnya. LLM menjelaskan
+hasil dan memilih konteks tambahan. Jika hanya terdapat event gagal tanpa event
+success, sistem tidak boleh mengubahnya menjadi fakta "login berhasil".
+
 ### 8. AI guardrails dan konfigurasi
 
 Konfigurasi penting:
