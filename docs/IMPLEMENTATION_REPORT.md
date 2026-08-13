@@ -6,10 +6,14 @@
 > productization, schema resmi telah dinaikkan ke `0007_vigil_replay_snapshots`;
 > API tidak lagi melakukan DDL saat startup, readiness memeriksa PostgreSQL,
 > Redis, dan evidence storage, login memiliki rate limit, dan response header
-> keamanan/request ID sudah aktif. Validasi terbaru: backend **82 passed**,
-> VIGIL golden evaluation **10/10**, adversarial policy/envelope smoke
-> **11/11**, detection golden evaluation **6/6**, frontend
-> typecheck/build **passed**, dan Docker production build **passed**.
+> keamanan/request ID sudah aktif. Validasi terbaru pada revision `2bf0ca2`:
+> backend **95 passed** (satu deprecation warning dependency), claim/evidence
+> evaluator **5/5**, VIGIL golden evaluation **6/6**, Phase 2 golden evaluation
+> **10/10**, adversarial policy/envelope smoke **11/11**, detection golden
+> evaluation **6/6**, frontend typecheck/build **passed**, dan Compose
+> validation **passed**. Runtime smoke login-case-upload-parse-timeline-findings
+> juga **passed**. Rincian reproducible dan caveat tersedia di
+> [`TEST_EVIDENCE_REPORT_ID.md`](TEST_EVIDENCE_REPORT_ID.md).
 >
 > Status jujur tetap **production-oriented beta foundation**. TLS/WAF, secret
 > manager, managed storage, restore drill, DAST, load/soak, dan sign-off

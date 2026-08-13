@@ -5,8 +5,11 @@ from app.vigil import (
     advance_lifecycle,
     build_contradiction_matrix,
     build_investigation_policy,
+    classify_investigation_goal,
+    collect_evidence_ids,
     ensure_vigil_state,
     initial_vigil_state,
+    hydrate_case_memory,
     merge_hypotheses,
     public_state_summary,
     record_repair,
@@ -28,6 +31,15 @@ class EvidenceDB:
         return iter(self.events)
 
 
+def test_collect_evidence_ids_reads_nested_summary_lists():
+    first, second = uuid.uuid4(), uuid.uuid4()
+    result = collect_evidence_ids({
+        "findings": [{"evidence_ids": [str(first), str(second)]}],
+        "nested": {"supporting_evidence_ids": [str(first)]},
+    })
+    assert result == [str(first), str(second)]
+
+
 def test_plan_is_explicit_bounded_and_operational():
     case_id = uuid.uuid4()
     state = initial_vigil_state(case_id, "Apa rangkaian login pada case ini?", 6, 3, 2)
@@ -38,6 +50,103 @@ def test_plan_is_explicit_bounded_and_operational():
     ]
     assert state["repair_state"]["max_attempts"] == 2
     assert public_state_summary(state)["plan"]["steps"][0]["status"] == "pending"
+    assert state["goal_profile"]["id"] == "authentication"
+    assert state["success_contract"]["requires_disconfirming_search"] is True
+
+
+def test_goal_classifier_selects_specialized_bounded_playbooks():
+    web = classify_investigation_goal("Investigate nginx HTTP request dan kemungkinan exploit URL")
+    execution = classify_investigation_goal("Periksa PowerShell command dan persistence service")
+    integrity = classify_investigation_goal("Validasi hash evidence, raw line, dan chain of custody")
+    general = classify_investigation_goal("Apa yang terjadi pada case ini?")
+
+    assert web["id"] == "web_activity"
+    assert web["confidence"] == "high"
+    assert execution["id"] == "execution_persistence"
+    assert integrity["id"] == "evidence_integrity"
+    assert general["id"] == "general"
+
+
+def test_specialized_playbook_has_success_contract_and_bounded_tools():
+    state = initial_vigil_state(uuid.uuid4(), "Apakah ada eksploitasi HTTP pada nginx?", 6)
+    plan = state["plan"]
+
+    assert plan["goal_profile"]["id"] == "web_activity"
+    assert len(plan["steps"]) == 5
+    assert plan["success_contract"]["minimum_evidence_ids"] == 1
+    assert plan["success_contract"]["requires_disconfirming_search"] is True
+    assert all(set(step["suggested_tools"]).issubset({
+        "search_events", "search_disconfirming_evidence", "get_surrounding_events",
+        "build_timeline", "correlate_entities", "get_raw_evidence", "generate_case_summary",
+    }) for step in plan["steps"])
+
+
+def test_legacy_plan_is_upgraded_without_losing_completed_steps():
+    case_id = uuid.uuid4()
+    state = initial_vigil_state(case_id, "Apa rangkaian login?", 6)
+    state["plan"]["plan_schema_version"] = "investigation-plan-v1"
+    state["plan"]["steps"][0]["status"] = "completed"
+    state["plan"]["steps"][0]["status_reason"] = "legacy completed"
+
+    upgraded = ensure_vigil_state(state, case_id, "Apa rangkaian login?", 6)
+
+    assert upgraded["plan"]["plan_schema_version"] == "investigation-plan-v2"
+    assert upgraded["plan"]["goal_profile"]["id"] == "authentication"
+    assert upgraded["plan"]["steps"][0]["status"] == "completed"
+    assert upgraded["plan"]["steps"][0]["status_reason"] == "legacy completed"
+    assert upgraded["success_contract"]["requires_disconfirming_search"] is True
+
+
+def test_case_memory_hydration_is_curated_and_case_scoped():
+    case_id, other_case = uuid.uuid4(), uuid.uuid4()
+    state = initial_vigil_state(case_id, "Lanjutkan investigasi", 6)
+    prior = {
+        "case_id": str(case_id),
+        "verification_summary": {"verified_count": 1},
+        "final_claim_ids": [str(uuid.uuid4())],
+        "case_memory": {
+            "case_id": str(case_id),
+            "confirmed_entities": ["203.0.113.45"],
+            "known_benign_patterns": ["maintenance window"],
+            "rejected_hypotheses": ["H-OLD"],
+            "resolved_questions": ["Apakah ada failure?"],
+            "relevant_evidence_ids": [str(uuid.uuid4())],
+        },
+        "messages": [{"role": "user", "content": "secret raw prompt must not hydrate"}],
+    }
+    foreign = {
+        "case_id": str(other_case),
+        "case_memory": {"case_id": str(other_case), "confirmed_entities": ["198.51.100.7"]},
+    }
+
+    hydrate_case_memory(state, [prior, foreign])
+
+    memory = state["case_memory"]
+    assert memory["memory_schema_version"] == "case-memory-v2"
+    assert memory["source_run_count"] == 1
+    assert memory["confirmed_entities"] == ["203.0.113.45"]
+    assert "198.51.100.7" not in memory["confirmed_entities"]
+    assert "secret raw prompt must not hydrate" not in str(memory)
+    assert state["question"] in memory["unresolved_questions"]
+
+
+def test_case_memory_ignores_unverified_completed_run():
+    case_id = uuid.uuid4()
+    state = initial_vigil_state(case_id, "Lanjutkan investigasi", 6)
+    unverified = {
+        "case_id": str(case_id),
+        "verification_summary": {"verified_count": 0},
+        "final_claim_ids": [],
+        "case_memory": {
+            "case_id": str(case_id),
+            "confirmed_entities": ["poisoned-memory-entity"],
+        },
+    }
+
+    hydrate_case_memory(state, [unverified])
+
+    assert "poisoned-memory-entity" not in state["case_memory"]["confirmed_entities"]
+    assert state["case_memory"]["source_run_count"] == 0
 
 
 def test_valid_state_transitions_are_persisted():

@@ -3,7 +3,7 @@
 Investigasi log keamanan siber berbasis bukti dengan bantuan AI untuk operasi defensif.
 
 [![Security and Quality](https://github.com/davidlimss/TraceLens/actions/workflows/security-quality.yml/badge.svg)](https://github.com/davidlimss/TraceLens/actions/workflows/security-quality.yml)
-[![Project Status: Alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#status-proyek)
+[![Project Status: Beta foundation](https://img.shields.io/badge/status-beta%20foundation-blue.svg)](#status-proyek)
 [![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](backend/pyproject.toml)
 [![Node.js 22](https://img.shields.io/badge/node-22-339933.svg)](frontend/package.json)
 
@@ -21,6 +21,23 @@ TraceLens saat ini berada pada tahap **production-oriented beta foundation untuk
 | Quality | CI otomatis, test parser/engine/security/agent, evaluation offline |
 | Production readiness | Bersyarat; deployment gate masih wajib dipenuhi |
 | Release | Branch, pull request, migration, changelog, dan CI gate |
+
+## Bukti review dan reproducibility
+
+Reviewer dapat memeriksa bukti teknis tanpa membaca seluruh source terlebih
+dahulu:
+
+- [Laporan bukti pengujian](docs/TEST_EVIDENCE_REPORT_ID.md) — perintah, hasil,
+  revision source, dan batas interpretasi;
+- [Respons terhadap review capstone](docs/REVIEW_RESPONSE_ID.md) — tindak
+  lanjut lisensi, repository governance, dan scope limitation;
+- [Proses release](docs/RELEASE_PROCESS.md) — checklist test, security scan,
+  backup/restore, changelog, tag, dan rollback;
+- [LICENSE](LICENSE) — hak penggunaan kode aplikasi.
+
+Angka evaluasi di repository adalah regression evidence pada corpus internal
+terkontrol. Angka tersebut tidak boleh dibaca sebagai F1 produksi,
+availability guarantee, atau validasi independent red-team.
 
 ## Latar belakang dan tujuan
 
@@ -480,6 +497,48 @@ tersimpan. Trace yang ditampilkan ke UI hanya berupa status, tool, step,
 evidence ID, reason code, latency, dan stop reason—bukan chain-of-thought
 pribadi model.
 
+#### Goal-aware playbook dan success contract
+
+Pada versi `investigation-plan-v2`, planner deterministik mengklasifikasikan
+tujuan investigator ke playbook bounded: `authentication`, `web_activity`,
+`execution_persistence`, `evidence_integrity`, atau `general`. Klasifikasi ini
+tidak menentukan apakah serangan benar-benar terjadi; fungsinya hanya memilih
+urutan pencarian, entity yang perlu diperiksa, dan bukti yang diharapkan.
+
+Setiap plan juga membawa `success_contract` yang berisi observasi minimum,
+kewajiban mencari bukti yang membantah, dan syarat claim. Model tidak boleh
+menandai goal sebagai selesai hanya karena menemukan satu event; backend tetap
+menilai evidence gap, semantic support, dan verifier result.
+
+```text
+authentication -> failure/success -> timeline -> correlation
+                -> disconfirming search -> claim verification
+web_activity   -> request/path/status -> context -> host correlation
+                -> benign scanner check -> outcome verification
+integrity      -> hash/parser/raw-line -> provenance conflict check
+                -> completeness gap -> export/claim decision
+```
+
+Perubahan ini memperkuat agentic behavior secara terukur: plan menjadi
+goal-aware, expected evidence dapat dievaluasi, dan alasan berhenti dapat
+dibandingkan antar-playbook. Semua profile tetap deterministic, read-only,
+case-scoped, dan tidak mengambil alih parser, timeline, correlation, atau risk
+engine.
+
+#### Case-scoped memory antar-run
+
+Saat investigator membuka run baru pada case yang sama, supervisor dapat
+menghidrasi memori terkurasi dari maksimal lima run selesai sebelumnya. Hanya
+summary operasional yang dibawa: entity terkonfirmasi, pola benign, hipotesis
+yang ditolak, pertanyaan yang sudah selesai, dan evidence ID lokal. Raw prompt,
+raw log, pesan model, secret, dan memory dari case lain tidak pernah ikut.
+
+Memori ini memakai `case-memory-v2`, memiliki source count dan timestamp
+hydration, serta tetap melewati case boundary. Hanya run dengan claim yang
+lolos verification gate yang boleh menjadi sumber memory berikutnya; run
+abstain, gagal, atau provider-error dikeluarkan. Jika query history gagal,
+agent memulai dengan memory kosong dan investigasi read-only tetap berjalan.
+
 #### Apa yang dilakukan LLM dan apa yang tidak
 
 | LLM boleh melakukan | LLM tidak boleh melakukan |
@@ -622,10 +681,13 @@ diteruskan ke provider.
 ## Validasi dan testing
 
 ```bash
-pytest -q backend/tests
-python backend/evals/run_eval.py
-python backend/evals/run_detection_eval.py
-python backend/evals/run_vigil_eval.py
+cd backend
+pytest -q -o addopts=''
+python evals/run_eval.py
+python evals/run_vigil_eval.py
+python evals/run_phase2_eval.py
+python evals/run_adversarial_eval.py
+python evals/run_detection_eval.py
 ```
 
 Pada Windows, jalankan validasi lengkap:
@@ -634,20 +696,35 @@ Pada Windows, jalankan validasi lengkap:
 .\scripts\validate.ps1
 ```
 
-Validation gate yang saat ini dipakai:
+Baseline validation gate yang tercatat pada source revision `2bf0ca2`:
 
-- 82 backend test lulus pada container Python 3.12;
-- VIGIL golden evaluation 10/10 dan adversarial policy/envelope smoke 11/11;
-- detection golden set internal 6/6 dengan precision, recall, dan F1 1.0;
-- frontend typecheck, production build, dan `npm audit` lulus;
-- `pip-audit`, Trivy image scan, dan Gitleaks secret scan lulus di GitHub CI;
-- Docker Compose development dan production overlay berhasil divalidasi;
-- runtime smoke berhasil: login, create case, upload, parsing, event, finding;
-- load smoke lokal 200 request dengan 20 concurrency mencapai success rate 100%.
+- 88 backend test lulus pada Python 3.12 (satu deprecation warning dari
+  dependency, tidak ada test gagal);
+- claim/evidence evaluator `5/5`, VIGIL evaluator `6/6`, dan Phase 2 golden
+  evaluator `10/10`;
+- adversarial policy/envelope smoke `11/11`;
+- detection golden set internal `6/6` dengan precision, recall, dan F1 1.0;
+- frontend typecheck dan Next.js production build lulus;
+- Docker Compose development/production overlay tervalidasi;
+- runtime smoke berhasil: login, create case, upload, parsing, timeline, dan
+  findings; readiness melaporkan database, Redis, evidence storage, schema
+  `0007_vigil_replay_snapshots`, parser `1.1.0`, dan risk `risk-v1.1` siap.
 
-Angka tersebut adalah bukti regression dan smoke path repository, bukan klaim
-generalisasi pada corpus SOC besar, availability bulanan, atau hasil red-team
-independen. Evaluation agent offline tidak memanggil provider model live.
+Rincian perintah, output, scope, caveat, dan hasil ingestion disimpan pada
+[Test Evidence Report](docs/TEST_EVIDENCE_REPORT_ID.md). Angka tersebut adalah
+bukti regression dan smoke path repository pada corpus internal terbatas, bukan
+klaim generalisasi pada corpus SOC besar, availability bulanan, atau hasil
+independent red-team. Evaluator agent offline tidak memanggil provider/model
+live; pengujian gate-off/gate-on dengan anotator manusia masih menjadi pekerjaan
+lanjutan.
+
+Sebagai verifikasi ulang setelah review-hardening di working tree ini,
+`cd backend; python -m pytest -q -o addopts=''` menghasilkan **95 passed, 1
+warning**. Rerun ini belum memiliki commit/tag baru; setelah perubahan
+dipublikasikan, revision dan hasilnya harus dicatat kembali pada test evidence
+report melalui release checklist. Pada rerun Docker, health/readiness lulus dan
+load smoke 200 request dengan concurrency 20 menghasilkan success rate 100%
+dengan p95 424.26 ms; ini smoke check lokal, bukan jaminan SLO produksi.
 
 ## Baseline production
 
@@ -752,6 +829,7 @@ perubahan yang menyentuh evidence atau AI claim.
 - [Threat model](docs/THREAT_MODEL.md)
 - [Dokumentasi arsitektur teknis](docs/TRACELENS_ARSITEKTUR_TEKNIS_ID.md)
 - [Dokumentasi prompt agent VIGIL](docs/TRACELENS_AGENT_PROMPTS_ID.md)
+- [Bukti pengujian dan reproducibility](docs/TEST_EVIDENCE_REPORT_ID.md)
 - [Arsitektur agent VIGIL](docs/AGENTIC_V2_ARCHITECTURE.md)
 - [Integrasi MCP external read-only](docs/EXTERNAL_MCP_INTEGRATION_ID.md)
 - [Production readiness](docs/PRODUCTION_READINESS.md)
@@ -769,4 +847,7 @@ Kontribusi dipersilakan. Baca [CONTRIBUTING.md](CONTRIBUTING.md), tambahkan test
 
 ## Lisensi
 
-Lisensi open-source belum dideklarasikan. Sampai lisensi ditambahkan, seluruh hak tetap berada pada pemilik repository.
+Kode aplikasi dilisensikan di bawah [MIT License](LICENSE). Dependency pihak
+ketiga tetap mengikuti lisensinya masing-masing. Lisensi aplikasi tidak
+mencakup evidence yang diunggah operator, credential, merek pihak ketiga, atau
+data dari provider eksternal.

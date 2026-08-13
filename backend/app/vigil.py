@@ -23,7 +23,8 @@ from app.vigil_policy import (
 
 
 STATE_SCHEMA_VERSION = "vigil-state-v2"
-PLAN_SCHEMA_VERSION = "investigation-plan-v1"
+PLAN_SCHEMA_VERSION = "investigation-plan-v2"
+PLAYBOOK_SCHEMA_VERSION = "investigation-playbook-v1"
 MAX_ACTION_HISTORY = 100
 MAX_OBSERVED_EVIDENCE = 500
 MAX_HYPOTHESES = 8
@@ -31,6 +32,8 @@ MAX_GAPS = 24
 MAX_PROVENANCE = 1000
 MAX_TRANSITIONS = 100
 MAX_CANDIDATE_ACTIONS = 24
+MAX_CASE_MEMORY_RUNS = 5
+MAX_CASE_MEMORY_ITEMS = 40
 
 PLAN_STATUSES = {"pending", "active", "completed", "skipped", "blocked", "failed"}
 HYPOTHESIS_STATUSES = {"proposed", "investigating", "supported", "weakened", "refuted", "unresolved"}
@@ -79,19 +82,28 @@ def _uuid_strings(values: Any, allowed: set[str] | None = None, limit: int = MAX
 
 def collect_evidence_ids(value: Any, limit: int = MAX_OBSERVED_EVIDENCE) -> list[str]:
     found: list[str] = []
+    evidence_keys = {
+        "evidence_id", "evidence_ids", "event_id", "target_evidence_id",
+        "canonical_event_id", "supporting_evidence_ids", "contradicting_evidence_ids",
+        "neutral_evidence_ids",
+    }
 
     def visit(item: Any) -> None:
         if len(found) >= limit:
             return
         if isinstance(item, dict):
             for key, child in item.items():
-                if key in {"evidence_id", "event_id", "target_evidence_id", "canonical_event_id"}:
-                    try:
-                        candidate = str(uuid.UUID(str(child)))
-                    except (ValueError, TypeError, AttributeError):
-                        candidate = None
-                    if candidate and candidate not in found:
-                        found.append(candidate)
+                if key in evidence_keys:
+                    candidates = child if isinstance(child, list) else [child]
+                    for candidate_value in candidates:
+                        try:
+                            candidate = str(uuid.UUID(str(candidate_value)))
+                        except (ValueError, TypeError, AttributeError):
+                            candidate = None
+                        if candidate and candidate not in found:
+                            found.append(candidate)
+                        if len(found) >= limit:
+                            return
                 else:
                     visit(child)
         elif isinstance(item, list):
@@ -114,13 +126,130 @@ def _step(step_id: str, objective: str, tools: list[str], expected: list[str], d
     }
 
 
-def create_investigation_plan(question: str, max_revisions: int = 3) -> dict:
-    """Create a bounded operational plan without using an LLM."""
-    text = str(question or "").strip()
-    auth_focus = bool(re.search(r"login|auth|ssh|sudo|password|gagal|berhasil|akun", text, re.I))
-    evidence_focus = bool(re.search(r"bukti|evidence|raw|baris|line", text, re.I))
-    if auth_focus:
-        steps = [
+_PLAYBOOKS: dict[str, dict[str, Any]] = {
+    "authentication": {
+        "label": "Authentication investigation",
+        "signals": ("login", "auth", "ssh", "sudo", "password", "gagal", "berhasil", "akun", "credential"),
+        "questions": [
+            "Sumber dan user mana yang terlibat?",
+            "Apakah ada pola failure berulang?",
+            "Apakah terdapat success setelah failure?",
+            "Apakah ada penjelasan benign atau bukti kontradiktif?",
+        ],
+        "success_criteria": [
+            "Identifikasi event authentication dan entity utama.",
+            "Susun kronologi event secara deterministik.",
+            "Periksa korelasi source IP, username, dan session.",
+            "Cari bukti benign atau kontradiktif sebelum menyimpulkan.",
+            "Semua claim final memiliki evidence ID dan limitation.",
+        ],
+    },
+    "web_activity": {
+        "label": "Web activity investigation",
+        "signals": ("http", "https", "nginx", "apache", "web", "url", "request", "endpoint", "exploit", "xss", "sql injection", "status code"),
+        "questions": [
+            "Path, method, status, dan source IP apa yang dominan?",
+            "Apakah terdapat urutan request yang mengarah pada exploitation?",
+            "Apakah pola tersebut dapat dijelaskan scanner atau health-check benign?",
+            "Host dan event lanjutan apa yang berkorelasi?",
+        ],
+        "success_criteria": [
+            "Identifikasi request web, path, method, status, dan source.",
+            "Susun urutan request serta konteks sebelum/sesudahnya.",
+            "Korelasi source IP dan host dengan event lain.",
+            "Cari scanner, health-check, maintenance, atau bukti kontradiktif.",
+            "Jangan menyebut exploitation berhasil tanpa outcome evidence.",
+        ],
+    },
+    "execution_persistence": {
+        "label": "Execution and persistence investigation",
+        "signals": ("powershell", "process", "command", "shell", "service", "persistence", "scheduled task", "cron", "exec", "malware"),
+        "questions": [
+            "Process, parent process, command line, atau service apa yang muncul?",
+            "Apakah ada urutan eksekusi dan privilege escalation?",
+            "Apakah aktivitas dapat dijelaskan administrasi atau deployment resmi?",
+            "Bukti host/file tambahan apa yang perlu dikumpulkan?",
+        ],
+        "success_criteria": [
+            "Identifikasi process, command, file, host, dan outcome yang tersedia.",
+            "Susun kronologi eksekusi dan konteks entity terkait.",
+            "Periksa persistence, privilege, dan korelasi event.",
+            "Cari maintenance, deployment, atau aktivitas admin sebagai alternatif.",
+            "Hipotesis tetap dibatasi oleh evidence dan additional evidence.",
+        ],
+    },
+    "evidence_integrity": {
+        "label": "Evidence and provenance investigation",
+        "signals": ("evidence", "bukti", "raw", "hash", "integrity", "integritas", "provenance", "chain of custody", "baris", "line"),
+        "questions": [
+            "Evidence file dan hash apa yang tersedia?",
+            "Event mana yang memiliki raw line dan provenance lengkap?",
+            "Apakah ada quarantine, warning, timestamp assumption, atau konflik sumber?",
+            "Bukti tambahan apa yang diperlukan sebelum export atau claim?",
+        ],
+        "success_criteria": [
+            "Tentukan evidence source, hash, parser status, dan completeness.",
+            "Hubungkan claim ke event atau snapshot lokal yang immutable.",
+            "Tandai timestamp uncertainty, quarantine, dan konflik provenance.",
+            "Jangan menganggap hash valid sebagai bukti bahwa isi log benar.",
+            "Export hanya setelah limitation dan evidence gap terlihat jelas.",
+        ],
+    },
+    "general": {
+        "label": "General case investigation",
+        "signals": (),
+        "questions": [
+            "Apa event dan finding utama?",
+            "Entity apa yang menghubungkan event?",
+            "Apa bukti pendukung dan kontradiktif?",
+            "Apa yang masih belum dapat dipastikan?",
+        ],
+        "success_criteria": [
+            "Ambil ringkasan atau evidence yang relevan dengan tujuan investigator.",
+            "Susun timeline dan konteks event secara deterministik.",
+            "Periksa entity, correlation, dan alternatif benign.",
+            "Semua claim final memiliki evidence ID, status, dan limitation.",
+        ],
+    },
+}
+_PLAYBOOK_PRIORITY = ("authentication", "web_activity", "execution_persistence", "evidence_integrity", "general")
+
+
+def classify_investigation_goal(question: str) -> dict[str, Any]:
+    """Classify an investigator goal into a bounded playbook.
+
+    This is intentionally deterministic.  It does not infer attacker identity or
+    risk; it only selects an operational search strategy that the agent may use.
+    """
+    text = str(question or "").strip().lower()
+    scores: dict[str, int] = {}
+    matched: dict[str, list[str]] = {}
+    for profile_id, profile in _PLAYBOOKS.items():
+        if profile_id == "general":
+            continue
+        hits = [signal for signal in profile.get("signals", ()) if signal in text]
+        scores[profile_id] = len(hits)
+        matched[profile_id] = hits[:8]
+    best_id = max(scores, key=lambda item: (scores[item], -_PLAYBOOK_PRIORITY.index(item))) if scores else "general"
+    best_score = scores.get(best_id, 0)
+    if best_score == 0:
+        best_id = "general"
+    confidence = "high" if best_score >= 3 else ("medium" if best_score >= 1 else "low")
+    profile = _PLAYBOOKS[best_id]
+    return {
+        "playbook_schema_version": PLAYBOOK_SCHEMA_VERSION,
+        "id": best_id,
+        "label": profile["label"],
+        "confidence": confidence,
+        "matched_signals": matched.get(best_id, []),
+        "scores": {key: value for key, value in scores.items() if value > 0},
+    }
+
+
+def _profile_steps(profile_id: str, evidence_focus: bool) -> tuple[list[dict], list[str]]:
+    """Return a bounded plan for a classified goal profile."""
+    if profile_id == "authentication":
+        return [
             _step("step-001", "Identifikasi event authentication dan sumber yang dominan",
                   ["search_events"], ["authentication events", "source IP", "username"]),
             _step("step-002", "Susun kronologi authentication secara deterministik",
@@ -131,39 +260,84 @@ def create_investigation_plan(question: str, max_revisions: int = 3) -> dict:
                   ["search_disconfirming_evidence", "search_events"], ["maintenance", "scanner", "benign context"]),
             _step("step-005", "Verifikasi claim dan tentukan kecukupan bukti",
                   ["generate_case_summary", "get_raw_evidence"], ["claim evidence", "limitations"]),
-        ]
-        questions = [
-            "Sumber dan user mana yang terlibat?",
-            "Apakah ada pola failure berulang?",
-            "Apakah terdapat success setelah failure?",
-            "Apakah ada penjelasan benign atau bukti kontradiktif?",
-        ]
-    else:
-        steps = [
-            _step("step-001", "Ambil ringkasan atau evidence yang diminta investigator",
-                  ["get_raw_evidence" if evidence_focus else "generate_case_summary"],
-                  ["raw evidence" if evidence_focus else "findings", "risk breakdown"]),
-            _step("step-002", "Susun timeline event secara deterministik",
-                  ["build_timeline"], ["ordered events", "timestamps"]),
-            _step("step-003", "Periksa entity dan konteks sekitar event penting",
-                  ["search_events", "correlate_entities", "get_surrounding_events"], ["entities", "context"]),
-            _step("step-004", "Cari bukti yang melemahkan interpretasi awal",
-                  ["search_disconfirming_evidence", "search_events"], ["contradicting evidence", "alternative"]),
-            _step("step-005", "Verifikasi claim dan gap",
-                  ["get_raw_evidence", "generate_case_summary"], ["claim evidence", "limitations"]),
-        ]
-        questions = [
-            "Apa event dan finding utama?",
-            "Entity apa yang menghubungkan event?",
-            "Apa bukti pendukung dan kontradiktif?",
-            "Apa yang masih belum dapat dipastikan?",
-        ]
+        ], list(_PLAYBOOKS[profile_id]["questions"])
+    if profile_id == "web_activity":
+        return [
+            _step("step-001", "Identifikasi request web, path, method, status, dan source",
+                  ["search_events"], ["HTTP events", "URL path", "status", "source IP"]),
+            _step("step-002", "Susun urutan request dan konteks event sekitar",
+                  ["build_timeline", "get_surrounding_events"], ["ordered requests", "timestamps"]),
+            _step("step-003", "Korelasi source IP, host, dan entity terkait",
+                  ["correlate_entities", "search_events"], ["correlation reason", "host context"]),
+            _step("step-004", "Cari scanner, health-check, maintenance, atau bukti kontradiktif",
+                  ["search_disconfirming_evidence", "search_events"], ["benign context", "contradiction"]),
+            _step("step-005", "Verifikasi outcome dan batasan claim web",
+                  ["get_raw_evidence", "generate_case_summary"], ["raw request", "outcome", "limitations"]),
+        ], list(_PLAYBOOKS[profile_id]["questions"])
+    if profile_id == "execution_persistence":
+        return [
+            _step("step-001", "Identifikasi process, command, file, service, dan host",
+                  ["search_events"], ["process/command", "file", "host"]),
+            _step("step-002", "Susun kronologi eksekusi dan konteks privilege",
+                  ["build_timeline", "get_surrounding_events"], ["ordered events", "parent context"]),
+            _step("step-003", "Korelasi process, user, host, dan session",
+                  ["correlate_entities", "search_events"], ["shared entities", "correlation reason"]),
+            _step("step-004", "Cari deployment, maintenance, atau aktivitas admin yang benign",
+                  ["search_disconfirming_evidence", "search_events"], ["benign context", "contradiction"]),
+            _step("step-005", "Verifikasi command evidence dan kebutuhan bukti lanjutan",
+                  ["get_raw_evidence", "generate_case_summary"], ["raw command", "limitations"]),
+        ], list(_PLAYBOOKS[profile_id]["questions"])
+    if profile_id == "evidence_integrity":
+        first_tool = "get_raw_evidence" if evidence_focus else "generate_case_summary"
+        return [
+            _step("step-001", "Periksa status evidence, provenance, dan hash source",
+                  [first_tool, "generate_case_summary"], ["evidence status", "hash/provenance"]),
+            _step("step-002", "Petakan event ke raw line dan timestamp provenance",
+                  ["search_events", "get_raw_evidence"], ["raw line", "timestamp assumptions"]),
+            _step("step-003", "Periksa urutan dan konflik lintas sumber",
+                  ["build_timeline", "get_surrounding_events"], ["timeline", "source conflict"]),
+            _step("step-004", "Cari konteks yang menjelaskan warning atau gap evidence",
+                  ["search_disconfirming_evidence", "search_events"], ["quarantine", "alternative context"]),
+            _step("step-005", "Tentukan apakah claim atau export telah cukup didukung",
+                  ["generate_case_summary", "get_raw_evidence"], ["limitations", "required evidence"]),
+        ], list(_PLAYBOOKS[profile_id]["questions"])
+    first_tool = "get_raw_evidence" if evidence_focus else "generate_case_summary"
+    return [
+        _step("step-001", "Ambil ringkasan atau evidence yang diminta investigator",
+              [first_tool], ["raw evidence" if evidence_focus else "findings", "risk breakdown"]),
+        _step("step-002", "Susun timeline event secara deterministik",
+              ["build_timeline"], ["ordered events", "timestamps"]),
+        _step("step-003", "Periksa entity dan konteks sekitar event penting",
+              ["search_events", "correlate_entities", "get_surrounding_events"], ["entities", "context"]),
+        _step("step-004", "Cari bukti yang melemahkan interpretasi awal",
+              ["search_disconfirming_evidence", "search_events"], ["contradicting evidence", "alternative"]),
+        _step("step-005", "Verifikasi claim dan gap",
+              ["get_raw_evidence", "generate_case_summary"], ["claim evidence", "limitations"]),
+    ], list(_PLAYBOOKS["general"]["questions"])
+
+
+def create_investigation_plan(question: str, max_revisions: int = 3) -> dict:
+    """Create a bounded operational plan without using an LLM."""
+    text = str(question or "").strip()
+    evidence_focus = bool(re.search(r"bukti|evidence|raw|baris|line", text, re.I))
+    goal_profile = classify_investigation_goal(text)
+    steps, questions = _profile_steps(goal_profile["id"], evidence_focus)
+    profile_config = _PLAYBOOKS[goal_profile["id"]]
     return {
         "plan_schema_version": PLAN_SCHEMA_VERSION,
+        "playbook_schema_version": PLAYBOOK_SCHEMA_VERSION,
+        "goal_profile": goal_profile,
         "revision": 0,
         "max_revisions": max(0, min(int(max_revisions), 10)),
         "investigation_goal": text,
         "questions": questions,
+        "success_contract": {
+            "version": "success-contract-v1",
+            "required_observations": list(profile_config["success_criteria"]),
+            "minimum_evidence_ids": 1,
+            "requires_disconfirming_search": True,
+            "claim_requirements": ["case_scoped_evidence", "semantic_support", "limitations"],
+        },
         "steps": steps,
         "stop_conditions": [
             "goal_satisfied",
@@ -195,6 +369,8 @@ def initial_vigil_state(case_id: uuid.UUID | str, question: str, tool_budget: in
         "question": str(question),
         "investigation_goal": str(question),
         "plan": plan,
+        "goal_profile": deepcopy(plan.get("goal_profile") or {}),
+        "success_contract": deepcopy(plan.get("success_contract") or {}),
         "hypotheses": [],
         "hypothesis_competition": {},
         "evidence_gaps": [],
@@ -211,8 +387,10 @@ def initial_vigil_state(case_id: uuid.UUID | str, question: str, tool_budget: in
         },
         "repair_state": {"attempts": [], "max_attempts": max(0, min(int(max_repairs), 3))},
         "case_memory": {
-            "memory_schema_version": "case-memory-v1",
+            "memory_schema_version": "case-memory-v2",
             "case_id": str(case_id),
+            "source": "current_run_only",
+            "source_run_count": 0,
             "confirmed_entities": [],
             "known_benign_patterns": [],
             "rejected_hypotheses": [],
@@ -247,6 +425,58 @@ def initial_vigil_state(case_id: uuid.UUID | str, question: str, tool_budget: in
     }
 
 
+def hydrate_case_memory(state: dict, previous_states: list[dict] | None = None) -> dict:
+    """Merge curated memory from prior runs in the same case only.
+
+    Memory is deliberately restricted to operational summaries. Raw messages,
+    model text, credentials, and arbitrary prior state never cross a run.
+    """
+    active_case_id = str(state.get("case_id") or "")
+    memory = state.setdefault("case_memory", {})
+    if not active_case_id:
+        return state
+    allowed_lists = (
+        "confirmed_entities", "known_benign_patterns", "rejected_hypotheses",
+        "resolved_questions", "relevant_evidence_ids",
+    )
+    merged: dict[str, list[str]] = {key: list(memory.get(key) or []) for key in allowed_lists}
+    source_count = 0
+    for prior_state in (previous_states or [])[:MAX_CASE_MEMORY_RUNS]:
+        if not isinstance(prior_state, dict) or str(prior_state.get("case_id") or "") != active_case_id:
+            continue
+        # Cross-run memory is a trust boundary. Only consume summaries from a
+        # completed run whose claim gate produced at least one verified claim.
+        # A failed/abstained/provider-error run must not poison future plans.
+        verification = prior_state.get("verification_summary")
+        final_claim_ids = prior_state.get("final_claim_ids")
+        if not isinstance(verification, dict) or int(verification.get("verified_count") or 0) <= 0:
+            continue
+        if not isinstance(final_claim_ids, list) or not final_claim_ids:
+            continue
+        prior_memory = prior_state.get("case_memory")
+        if not isinstance(prior_memory, dict) or str(prior_memory.get("case_id") or "") != active_case_id:
+            continue
+        source_count += 1
+        for key in allowed_lists:
+            for item in (prior_memory.get(key) or [])[:MAX_CASE_MEMORY_ITEMS]:
+                value = str(item).strip()
+                if value and value not in merged[key]:
+                    merged[key].append(value)
+    memory.update({key: values[:MAX_CASE_MEMORY_ITEMS] for key, values in merged.items()})
+    memory.update({
+        "memory_schema_version": "case-memory-v2",
+        "case_id": active_case_id,
+        "source": "case_scoped_verified_run_summaries" if source_count else "current_run_only",
+        "source_run_count": source_count,
+        "hydrated_at": _utc_now(),
+    })
+    current_question = str(state.get("question") or "").strip()
+    if current_question and current_question not in memory.get("unresolved_questions", []):
+        memory["unresolved_questions"] = [current_question, *(memory.get("unresolved_questions") or [])]
+    memory["unresolved_questions"] = [str(item)[:500] for item in memory.get("unresolved_questions", [])[:MAX_CASE_MEMORY_ITEMS]]
+    return state
+
+
 def ensure_vigil_state(existing: dict | None, case_id: uuid.UUID | str, question: str,
                        tool_budget: int, max_revisions: int = 3, max_repairs: int = 2) -> dict:
     active_case_id = str(case_id)
@@ -274,14 +504,41 @@ def ensure_vigil_state(existing: dict | None, case_id: uuid.UUID | str, question
     state["case_id"] = active_case_id
     ensure_lifecycle(state)
     state.setdefault("question", str(question))
-    state.setdefault("plan", create_investigation_plan(question, max_revisions))
+    existing_plan = state.get("plan") if isinstance(state.get("plan"), dict) else None
+    if not existing_plan:
+        state["plan"] = create_investigation_plan(question, max_revisions)
+    elif existing_plan.get("plan_schema_version") != PLAN_SCHEMA_VERSION:
+        # Migrate older plans without discarding completed operational work.
+        upgraded_plan = create_investigation_plan(
+            str(existing_plan.get("investigation_goal") or question), max_revisions
+        )
+        old_steps = {str(item.get("step_id")): item for item in existing_plan.get("steps") or [] if isinstance(item, dict)}
+        for step in upgraded_plan.get("steps") or []:
+            old = old_steps.get(str(step.get("step_id")))
+            if not old:
+                continue
+            for key in ("status", "status_reason", "completed_at_step"):
+                if key in old:
+                    step[key] = old[key]
+        upgraded_plan["revision"] = min(int(existing_plan.get("revision") or 0), int(upgraded_plan.get("max_revisions") or 0))
+        upgraded_plan["revision_history"] = list(existing_plan.get("revision_history") or [])[-10:]
+        state["plan"] = upgraded_plan
+    if not isinstance(state.get("goal_profile"), dict) or not state.get("goal_profile"):
+        state["goal_profile"] = deepcopy((state.get("plan") or {}).get("goal_profile") or classify_investigation_goal(question))
+    if not isinstance(state.get("success_contract"), dict) or not state.get("success_contract"):
+        state["success_contract"] = deepcopy((state.get("plan") or {}).get("success_contract") or {})
+    if not (state.get("plan") or {}).get("goal_profile"):
+        state["plan"]["goal_profile"] = deepcopy(state["goal_profile"])
+    if not (state.get("plan") or {}).get("success_contract"):
+        state["plan"]["success_contract"] = deepcopy(state["success_contract"])
     state.setdefault("hypotheses", [])
     state.setdefault("hypothesis_competition", {})
     state.setdefault("evidence_gaps", [])
     state.setdefault("epistemic_state", {})
     state.setdefault("repair_state", {"attempts": [], "max_attempts": max_repairs})
     state.setdefault("case_memory", {
-        "memory_schema_version": "case-memory-v1", "case_id": str(case_id),
+        "memory_schema_version": "case-memory-v2", "case_id": str(case_id),
+        "source": "current_run_only", "source_run_count": 0,
         "confirmed_entities": [], "known_benign_patterns": [], "rejected_hypotheses": [],
         "resolved_questions": [], "unresolved_questions": [str(question)],
         "relevant_evidence_ids": [],
@@ -289,6 +546,9 @@ def ensure_vigil_state(existing: dict | None, case_id: uuid.UUID | str, question
     if str((state.get("case_memory") or {}).get("case_id") or active_case_id) != active_case_id:
         state["case_memory"] = initial_vigil_state(case_id, question, tool_budget, max_revisions, max_repairs)["case_memory"]
         state["provenance"] = []
+    state["case_memory"]["memory_schema_version"] = "case-memory-v2"
+    state["case_memory"].setdefault("source", "current_run_only")
+    state["case_memory"].setdefault("source_run_count", 0)
     state.setdefault("provenance", [])
     state.setdefault("stop_state", {"reason": None, "detail": None, "decided_at": None})
     state.setdefault("action_history", [])
@@ -910,6 +1170,8 @@ def public_state_summary(state: dict) -> dict:
         "current_state": lifecycle_state(state),
         "lifecycle": deepcopy(state.get("lifecycle") or {}),
         "plan": plan,
+        "goal_profile": deepcopy(state.get("goal_profile") or plan.get("goal_profile") or {}),
+        "success_contract": deepcopy(state.get("success_contract") or plan.get("success_contract") or {}),
         "hypotheses": deepcopy(state.get("hypotheses") or [])[:MAX_HYPOTHESES],
         "hypothesis_competition": deepcopy(state.get("hypothesis_competition") or {}),
         "evidence_gaps": deepcopy(state.get("evidence_gaps") or [])[:MAX_GAPS],

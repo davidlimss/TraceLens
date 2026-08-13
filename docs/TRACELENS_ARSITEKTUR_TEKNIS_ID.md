@@ -656,6 +656,37 @@ provider fixture yang dibekukan. Run diff bersifat deskriptif dan tidak memilih
 run yang lebih benar secara otomatis. Evaluasi offline disimpan bersama fixture
 dan test di `backend/evals/`, sehingga dapat direproduksi tanpa provider live.
 
+#### Goal-aware planning pada Phase 2+
+
+Planner memakai `investigation-plan-v2` dan memilih playbook deterministic
+berdasarkan tujuan pertanyaan: authentication, web activity,
+execution/persistence, evidence integrity, atau general investigation. Setiap
+playbook memuat pertanyaan operasional, expected evidence, urutan tool yang
+relevan, dan `success_contract`.
+
+`success_contract` bukan skor serangan. Ia adalah kontrak supervisor untuk
+menentukan apakah agent sudah mengumpulkan observasi minimum, sudah mencoba
+disconfirming search, serta sudah memiliki evidence ID dan limitation sebelum
+menyatakan goal selesai. Jika kontrak tidak terpenuhi, agent tetap dapat
+replan, meminta bukti tambahan, atau berhenti sebagai insufficient evidence.
+
+#### Case memory antar-run
+
+Run baru pada case yang sama dapat menghidrasi memori terkurasi dari maksimal
+lima run selesai sebelumnya. Memory `case-memory-v2` hanya membawa entity yang
+telah tercatat, pola benign, hipotesis yang ditolak, pertanyaan selesai, dan
+evidence UUID lokal. Hanya run dengan claim yang lolos verification gate yang
+boleh menjadi sumber memory berikutnya; run abstain, gagal, atau provider-error
+dikeluarkan. Raw prompt, raw log, chain-of-thought, secret, serta state dari
+case lain tidak ikut. Jika history query gagal, fallback-nya adalah memory
+kosong dan investigasi read-only tetap dapat berjalan.
+
+Perubahan ini memperluas perilaku agent tanpa memperluas privilege: LLM masih
+hanya mengusulkan langkah, sedangkan classifier, policy, executor, verifier,
+dan case boundary tetap deterministic. Peningkatan dapat diukur per playbook
+melalui tool efficiency, stop-decision accuracy, evidence completeness, dan
+unsupported-claim rate.
+
 ### 14. Review arsitektur terbaru
 
 #### Verdict
@@ -744,3 +775,11 @@ berikutnya adalah staging hardening, replay/evaluation yang dapat diaudit,
 tamper-evident audit sink, serta pengukuran NFR—bukan menambah jumlah agent.
 
 Dokumen prompt agent: [TRACELENS_AGENT_PROMPTS_ID.md](TRACELENS_AGENT_PROMPTS_ID.md).
+
+Paket diagram untuk proposal metodologi, termasuk arsitektur konteks, DFD
+Level 0/1, flowchart penelitian dan sistem, ERD, alur VIGIL, state machine,
+use case, serta deployment tersedia di
+[PROPOSAL_METHODOLOGY_DIAGRAMS_ID.md](PROPOSAL_METHODOLOGY_DIAGRAMS_ID.md).
+
+Bukti eksekusi, evaluator, runtime smoke, scope, dan batas validasi tersedia di
+[TEST_EVIDENCE_REPORT_ID.md](TEST_EVIDENCE_REPORT_ID.md).

@@ -23,7 +23,10 @@ jobs:
         run: |
           pip install -r requirements.txt pip-audit
           pytest -q
+          python evals/run_eval.py
           python evals/run_vigil_eval.py
+          python evals/run_phase2_eval.py
+          python evals/run_adversarial_eval.py
           python evals/run_detection_eval.py
           pip-audit -r requirements.txt
       - name: Frontend build and dependency audit

@@ -102,10 +102,11 @@ dan stop reason. Chain-of-thought tidak ditampilkan.
 
 ## Versi yang diaudit
 
-- state schema: `vigil-state-v2`;
-- plan schema: `investigation-plan-v1`;
-- prompt: `agent-investigator-vigil-v4`;
-- graph: `investigation-graph-v2`;
+- state schema: `vigil-state-v2` dengan case memory `case-memory-v2`; hanya
+  summary dari run yang memiliki claim terverifikasi yang boleh dihidrasi;
+- plan schema: `investigation-plan-v2` dengan goal profile dan success contract;
+- prompt: `agent-investigator-vigil-v5`;
+- graph: `investigation-graph-v3`;
 - tool schema: `tools-v3-vigil`.
 
 Perubahan pada parser, prompt, model, graph, risk, atau tool schema harus

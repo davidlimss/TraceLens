@@ -166,6 +166,10 @@ function DetailedAgentTrace({ detail, runId }: { detail?: AgentRunDetail; runId:
 function InvestigationTrace({ state, verification }: { state?: Record<string, unknown>; verification?: Record<string, unknown> }) {
   if (!state && !verification) return null;
   const plan = (state?.plan || {}) as Record<string, unknown>;
+  const goalProfile = (state?.goal_profile || plan.goal_profile || {}) as Record<string, unknown>;
+  const successContract = (state?.success_contract || plan.success_contract || {}) as Record<string, unknown>;
+  const requiredObservations = Array.isArray(successContract.required_observations)
+    ? successContract.required_observations.map(String) : [];
   const steps = Array.isArray(plan.steps) ? plan.steps as Record<string, unknown>[] : [];
   const hypotheses = Array.isArray(state?.hypotheses) ? state.hypotheses as Record<string, unknown>[] : [];
   const gaps = Array.isArray(state?.evidence_gaps) ? state.evidence_gaps as Record<string, unknown>[] : [];
@@ -190,6 +194,14 @@ function InvestigationTrace({ state, verification }: { state?: Record<string, un
     {typeof lifecycle.current_state === "string" && <div style={{ marginTop: 6 }}><strong>State:</strong> <span className="badge severity-info">{lifecycle.current_state}</span>
       {typeof lifecycle.transition_reason === "string" && <> · {lifecycle.transition_reason}</>}</div>}
     {typeof plan.investigation_goal === "string" && <p style={{ margin: "8px 0" }}><strong>Tujuan:</strong> {plan.investigation_goal}</p>}
+    {typeof goalProfile.label === "string" && <div style={{ marginTop: 8 }}><strong>Playbook:</strong> <span className="badge severity-info">{goalProfile.label}</span>
+      {typeof goalProfile.confidence === "string" && <> · classifier {goalProfile.confidence}</>}
+      {Array.isArray(goalProfile.matched_signals) && goalProfile.matched_signals.length > 0 && <> · signals: {goalProfile.matched_signals.map(String).join(", ")}</>}
+    </div>}
+    {requiredObservations.length > 0 && <details style={{ marginTop: 8 }}>
+      <summary style={{ cursor: "pointer" }}><strong>Success contract</strong> · disconfirming search wajib · minimal evidence {String(successContract.minimum_evidence_ids ?? 1)}</summary>
+      <ul style={{ margin: "6px 0 0 20px" }}>{requiredObservations.map((item, index) => <li key={`contract-${index}`}>{item}</li>)}</ul>
+    </details>}
     {steps.length > 0 && <div style={{ marginTop: 8 }}><strong>Rencana:</strong>
       <ol style={{ margin: "6px 0 0 20px" }}>{steps.map((step, index) => <li key={String(step.step_id || index)}>
         <span className="badge severity-info">{String(step.status || "pending")}</span> {String(step.objective || "")}
