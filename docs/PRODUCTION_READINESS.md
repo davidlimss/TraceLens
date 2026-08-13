@@ -3,6 +3,12 @@
 ## Implemented baseline
 
 - Authenticated case isolation, CSRF protection, rate limits, immutable evidence storage, SHA-256 integrity verification, and audit logs.
+- Formal Alembic schema revision `0006_production_hardening`; API startup checks
+  the revision and does not perform runtime DDL.
+- `/ready` verifies PostgreSQL, Redis, and evidence storage before reporting
+  readiness. `/health` remains a lightweight liveness endpoint.
+- Login is protected by per-IP and per-username fixed-window limits; API
+  responses include request IDs and baseline security headers.
 - SOC finding workflow with owner, status, disposition, analyst notes, and audited state changes.
 - Deterministic detections with confidence, risk, MITRE ATT&CK, false-positive context, and regression benchmark.
 - Readiness and Prometheus metrics for request traffic, latency, errors, and finding queue state.

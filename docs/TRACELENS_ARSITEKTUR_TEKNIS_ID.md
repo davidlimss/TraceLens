@@ -22,8 +22,8 @@ Prinsip terpentingnya adalah **deterministic-first**:
 - **Queue dan cache:** Redis 7.
 - **Async processing:** Celery Worker dan Celery Beat.
 - **Container runtime:** Docker Compose.
-- **LLM provider:** GitHub Models REST API dengan format chat-completions dan tool-calling.
-- **Model aktif:** `openai/gpt-4.1`.
+- **LLM provider:** LLM gateway OpenAI-compatible; konfigurasi aktif menggunakan Groq dan dapat diganti tanpa mengubah agent executor.
+- **Model aktif:** `openai/gpt-oss-120b` melalui endpoint provider yang dikonfigurasi di `.env`.
 - **Testing:** pytest, parser/detection evaluation, frontend typecheck, production build.
 
 #### Storage dan observability
@@ -48,7 +48,7 @@ Prinsip terpentingnya adalah **deterministic-first**:
                                              SQL/ORM  │     │      │ HTTPS
                                                      ▼     ▼      ▼
                                              ┌───────┐ ┌─────┐ ┌─────────────┐
-                                             │Postgres│ │Redis│ │GitHub Models│
+                                             │Postgres│ │Redis│ │LLM Gateway │
                                              └───────┘ └──┬──┘ └─────────────┘
                                                          │ broker/backend
                                                          ▼
@@ -81,9 +81,9 @@ PostgreSQL adalah system of record. Query child resource selalu dibatasi oleh `c
 
 Upload file besar tidak diproses di request HTTP. Backend menyimpan evidence dan membuat job, Redis menjadi broker, lalu Celery worker melakukan detection, parsing, normalization, correlation, detection, dan rebuild finding.
 
-#### GitHub Models
+#### LLM Gateway
 
-Provider hanya menerima prompt dan tool context yang sudah dibatasi. LLM tidak diberi akses database langsung dan tidak membuat canonical event.
+Gateway hanya meneruskan system policy, state terpilih, dan observation yang sudah dibatasi. Provider aktif saat ini adalah Groq melalui API OpenAI-compatible. LLM tidak diberi akses database langsung dan tidak membuat canonical event. Penggantian provider dilakukan melalui konfigurasi, bukan dengan memindahkan parsing atau policy ke provider.
 
 ### 4. Data flow end-to-end
 
@@ -202,13 +202,224 @@ Structured response:
 
 Backend memeriksa evidence existence, active-case ownership, claim status, minimum support untuk inference/hypothesis, entity consistency, count consistency, limitations, dan overclaim seperti compromise atau attribution. Jawaban final dibangun ulang dari claims yang lolos.
 
+#### Struktur runtime agentic VIGIL
+
+VIGIL (*Verified Investigation Graph & Evidence Loop*) adalah supervisor
+single-agent yang mengatur model, tools, state, evidence, dan verifier. Model
+tidak menjadi sumber kebenaran tunggal. Model hanya mengusulkan langkah; policy
+dan executor backend yang mengizinkan serta menjalankan langkah tersebut.
+
+```text
+                         +----------------------+
+                         | Investigator question|
+                         +----------+-----------+
+                                    |
+                                    v
+                         +----------------------+
+                         | FastAPI case boundary|
+                         | auth, membership,    |
+                         | active case, audit   |
+                         +----------+-----------+
+                                    |
+                                    v
+                 +----------------+----------------+
+                 |       VIGIL Supervisor           |
+                 | goal + plan + lifecycle + state   |
+                 +--------+---------------+-----------+
+                          |               |
+                  policy check       LLM gateway
+                          |               |
+                          v               v
+                 +--------+-------+  +----+---------+
+                 | Tool Policy    |  | Model         |
+                 | allowlist,     |  | tool choice,  |
+                 | case scope,    |  | hypothesis,   |
+                 | budget, state  |  | structured JSON|
+                 +--------+-------+  +----+---------+
+                          |               |
+                          +-------+-------+
+                                  v
+                         +----------------------+
+                         | ToolRegistry          |
+                         | local DB tools / MCP  |
+                         | read-only executor    |
+                         +----------+-----------+
+                                    |
+                                    v
+                         +----------------------+
+                         | Observation envelope |
+                         | untrusted data,       |
+                         | redaction, truncation |
+                         +----------+-----------+
+                                    |
+                                    v
+                         +----------------------+
+                         | State + evidence      |
+                         | ledger + provenance   |
+                         | gap + hypothesis      |
+                         +----------+-----------+
+                                    |
+                         +----------+----------+
+                         |                     |
+                         v                     v
+                  next action/replan    Claim Verification Gate
+                                               |
+                              +----------------+----------------+
+                              |                                 |
+                              v                                 v
+                     verified claims                  repair <= 2 / abstain
+                              |                                 |
+                              +----------------+----------------+
+                                               v
+                                      answer + audit + stop state
+```
+
+#### Komponen dan tanggung jawab agent
+
+| Komponen | Implementasi | Tanggung jawab |
+|---|---|---|
+| Goal boundary | FastAPI `case_id` dan `AgentRun.question` | Mengikat pertanyaan ke case aktif dan membership investigator |
+| Plan/state | `backend/app/vigil.py` | Membuat plan, hypothesis, evidence gap, next action, provenance, dan stop state |
+| Policy engine | `backend/app/vigil_policy.py` | Memvalidasi lifecycle transition, tool allowlist, budget, repetition, replan, repair, dan stop |
+| Model gateway | `backend/app/llm_gateway.py` | Mengirim policy/state terpilih ke model, menjalankan loop, retry terbatas, checkpoint, dan redaction |
+| Tool executor | `backend/app/agent_tools.py` | Menjalankan query case-scoped yang terstruktur; tidak menerima arbitrary SQL/DSL/command |
+| External adapter | `external_sources.py`, `mcp_server.py` | Mencari telemetry OpenSearch/Splunk/Wazuh secara read-only dan membuat snapshot lokal |
+| Observation boundary | untrusted data envelope | Memisahkan data log dari instruksi system dan menandai prompt-injection signal |
+| Evidence ledger | `AgentStep`, `EvidenceLedger`, `external_evidence` | Mencatat evidence yang benar-benar diamati dan asal provenance-nya |
+| Claim verifier | `backend/app/claim_verifier.py` | Menolak claim invalid, unsupported, lintas case, atau terlalu kuat |
+| Replay | `backend/app/replay.py` | Membuat snapshot run dan replay deterministik tanpa memanggil model |
+
+#### Lifecycle agent
+
+State machine VIGIL menggunakan state berikut:
+
+```text
+INITIALIZED
+    -> PLANNING
+    -> INVESTIGATING
+    -> EVIDENCE_REVIEW
+    -> VERIFYING
+    -> COMPLETED       (claim lolos)
+    -> ABSTAINED       (bukti tidak cukup)
+    -> FAILED          (provider/runtime failure)
+
+INVESTIGATING <-> EVIDENCE_REVIEW
+VERIFYING -> REPAIRING -> INVESTIGATING
+INVESTIGATING/VERIFYING -> PAUSED -> INVESTIGATING
+INVESTIGATING/VERIFYING -> CANCELLED
+```
+
+State terminal tidak dapat berjalan kembali secara normal. Resume hanya
+diizinkan dari run `paused` atau `failed`, lalu state dipulihkan dari checkpoint
+terakhir. Setiap transisi menyimpan alasan, timestamp, versi state machine, dan
+history sehingga investigator dapat memahami mengapa run berhenti.
+
+#### Siklus model--tool--observation--state
+
+1. **Initialize goal.** Backend membuat `AgentRun` dengan `case_id`, question,
+   prompt version, model version, graph version, dan state schema.
+2. **Create plan.** `create_investigation_plan()` membuat step deterministik
+   berdasarkan fokus pertanyaan, misalnya authentication, timeline,
+   correlation, disconfirming evidence, dan verification. Model boleh
+   mengusulkan revisi, tetapi maksimal tiga revisi dan hanya memakai tool yang
+   ada di allowlist.
+3. **Select action.** Model melihat system policy, public state summary, plan
+   step, dan tool schema. Model memilih tool; model tidak mengirim SQL atau
+   koneksi database.
+4. **Authorize action.** `InvestigationPolicy` memeriksa current state, active
+   case, nama tool, jumlah call, pengulangan, precondition, dan remaining
+   budget. Operasi ilegal ditolak sebelum executor berjalan.
+5. **Execute tool.** `ToolRegistry` mengambil event, timeline, correlation,
+   raw evidence, summary, atau external snapshot dari database secara
+   deterministik. Maksimal row dan window dibatasi.
+6. **Observe safely.** Hasil dibungkus sebagai data tidak tepercaya, dipotong
+   jika terlalu besar, secret di-redact, dan prompt-injection pattern hanya
+   menjadi signal keamanan—bukan instruksi yang harus diikuti.
+7. **Update state.** Evidence ID yang diamati masuk ledger. State memperbarui
+   hypothesis, evidence quality, contradiction matrix, gap, provenance edge,
+   progress, cost, dan next action.
+8. **Replan atau lanjut.** Jika gap belum terjawab, agent dapat memilih tool
+   berikutnya. Jika hypothesis suspicious belum diuji, policy mengarahkan
+   `search_disconfirming_evidence` untuk mencari maintenance, scanner, atau
+   alternatif benign.
+9. **Draft claim.** Model mengembalikan JSON yang berisi answer, claims,
+   hypotheses, limitations, required additional evidence, dan stop reason.
+10. **Verify and repair.** Backend memeriksa setiap kalimat sebagai unit
+    claim. Claim yang repairable dapat meminta evidence tambahan atau downgrade
+    maksimal dua kali. Tidak ada claim yang langsung ditampilkan sebelum gate.
+11. **Stop.** Run menjadi completed bila claim terverifikasi, abstained bila
+    bukti tidak cukup, atau failed/paused/cancelled sesuai kondisi runtime.
+
+#### Isi durable state `vigil-state-v2`
+
+```text
+AgentRun.state
+├── lifecycle + transition_history
+├── investigation_goal + open_questions
+├── plan + revision_history
+├── hypotheses + hypothesis_competition
+├── epistemic_state
+│   ├── confirmed_facts
+│   ├── active_hypotheses / rejected_hypotheses
+│   ├── unknowns / alternative_explanations
+│   └── evidence_gaps / observed_evidence_ids
+├── case_memory (case_id scoped)
+├── provenance edges
+├── collected_evidence_ids + action_history
+├── candidate_actions + action_ranking
+├── repair_state + verification_summary
+├── cost_accounting + remaining_tool_budget
+└── stop_state + reason
+```
+
+State ini bukan chain-of-thought. Ia adalah state operasional yang dibutuhkan
+untuk audit, pause/resume, deterministic replay, dan evaluasi trajectory.
+
+#### Batas kerja LLM dan backend
+
+| LLM/model | Backend deterministik |
+|---|---|
+| Memilih tool dan urutan pencarian | Menentukan parser, canonical event, timestamp, timeline, correlation, detection, dan risk |
+| Mengusulkan hypothesis dan alternatif | Mengikat semua query ke case aktif |
+| Menginterpretasikan observation terstruktur | Mengizinkan/menolak lifecycle dan tool call |
+| Menyusun fact, inference, atau hypothesis | Memvalidasi UUID evidence, ownership, entity, count, semantic support, dan limitation |
+| Mengusulkan replan atau stop | Menyimpan state, ledger, audit, hash, checkpoint, dan stop reason |
+
+Artinya, agentic autonomy berada pada **pemilihan langkah investigasi dan
+adaptasi terhadap evidence**, bukan pada perubahan sistem eksternal. TraceLens
+tetap single-agent karena scope-nya adalah investigasi read-only yang dapat
+direplay; menambah banyak agent tidak otomatis membuat reasoning lebih benar.
+
+#### Contoh trajectory konkret
+
+Pertanyaan investigator: *"Apakah ada login sukses setelah rentetan login
+gagal dari IP yang sama?"*
+
+```text
+1. Plan: authentication -> timeline -> correlation -> disconfirm -> verify
+2. search_events: ambil failure/success, source_ip, username, timestamp
+3. build_timeline: ambil urutan stabil dari database
+4. correlate_entities: ambil relasi source_ip dan alasan window waktu
+5. get_surrounding_events/get_raw_evidence: cocokkan raw line sumber
+6. search_disconfirming_evidence: cari maintenance/scanner/benign context
+7. Draft claim: fact/inference/hypothesis dengan evidence UUID
+8. Verifier: terima, downgrade, repair, atau tolak claim
+9. Stop: GOAL_SATISFIED atau INSUFFICIENT_EVIDENCE
+```
+
+Pada trajectory ini LLM tidak menghitung apakah lima event benar-benar berada
+di window sepuluh menit; engine correlation yang menghitungnya. LLM menjelaskan
+hasil dan memilih konteks tambahan. Jika hanya terdapat event gagal tanpa event
+success, sistem tidak boleh mengubahnya menjadi fakta "login berhasil".
+
 ### 8. AI guardrails dan konfigurasi
 
 Konfigurasi penting:
 
 ```env
-GITHUB_MODELS_ENDPOINT=https://models.github.ai/inference
-GITHUB_MODELS_MODEL=openai/gpt-4.1
+LLM_PROVIDER=groq
+LLM_ENDPOINT=https://api.groq.com/openai/v1
+LLM_MODEL=openai/gpt-oss-120b
 LLM_MAX_TOOL_ROUNDS=8
 LLM_MAX_TOOL_CALLS=20
 LLM_MAX_TOOL_RESULT_CHARACTERS=8000
@@ -231,7 +442,7 @@ Raw log dianggap untrusted data, diberi delimiter unik, secret redaction, trunca
 - Path traversal, absolute path, extension, MIME, size, UTF-8, dan content validation.
 - SHA-256 integrity verification.
 - Audit log untuk upload, chat, citation, export, dan integrity check.
-- Rate limit untuk upload dan chat; login rate limiting masih menjadi hardening item.
+- Rate limit untuk login, upload, dan chat menggunakan Redis fixed-window limiter.
 - Docker production baseline: non-root, read-only filesystem, drop capabilities, dan no-new-privileges.
 
 ### 10. API surface utama
@@ -276,3 +487,299 @@ Host port default:
 - PostgreSQL dan Redis tetap berada di network Compose.
 
 Production overlay menambahkan hardening container. Untuk production sungguhan masih dibutuhkan TLS/WAF, managed secrets, private database/object storage, centralized immutable audit retention, backup restore drill, SLO alerting, DAST, dan independent security assessment.
+
+### 12. Arsitektur target terbaik yang direkomendasikan
+
+Arsitektur terbaik untuk TraceLens bukan memecah sistem menjadi banyak agent.
+Pilihan yang paling kuat adalah **bounded single-agent di atas deterministic
+analysis plane**, dengan pemisahan data, reasoning, policy, dan execution.
+
+```text
+                    +-----------------------------+
+                    | Investigator / SOC reviewer |
+                    +--------------+--------------+
+                                   | HTTPS + session/CSRF
+                                   v
+                    +-----------------------------+
+                    | Next.js Investigator UI     |
+                    | case, evidence, trace,      |
+                    | findings, report            |
+                    +--------------+--------------+
+                                   | REST/JSON/multipart
+                                   v
+                    +-----------------------------+
+                    | FastAPI Case Boundary       |
+                    | authz, membership, API,     |
+                    | audit, orchestration        |
+                    +--+----------+----------+----+
+                       |          |          |
+                SQL/ORM |     enqueue      policy
+                       v          v          v
+             +---------+--+  +----+-----+  +--+------------------+
+             | PostgreSQL |  | Redis     |  | VIGIL Supervisor   |
+             | system of  |  | broker,   |  | goal, plan, state, |
+             | record     |  | lock, RL  |  | repair, stop       |
+             +------+-----+  +----+------+  +--+------------------+
+                    |             |            |
+                    |             v            v read-only tools
+                    |       +-----+------+  +--+------------------+
+                    |       | Celery     |  | Tool Policy        |
+                    |       | parser +   |  | allowlist, case    |
+                    |       | analysis   |  | scope, budget      |
+                    |       +-----+------+  +--+------------------+
+                    |             |            |
+                    v             v            v
+             +------+-----+  +----+------+  +--+------------------+
+             | Evidence   |  | Canonical |  | Private MCP        |
+             | storage    |  | events,   |  | OpenSearch/Splunk/ |
+             | UUID+hash  |  | timeline, |  | Wazuh read-only    |
+             +------------+  | findings  |  +---------------------+
+                              +-----------+
+                                   |
+                                   v
+                    +-----------------------------+
+                    | Claim Verification Gate     |
+                    | evidence, semantics, status |
+                    | limitation, fail-closed     |
+                    +--------------+--------------+
+                                   |
+                                   v
+                    +-----------------------------+
+                    | Verified answer + audit     |
+                    | human approval before any   |
+                    | future write action         |
+                    +-----------------------------+
+```
+
+#### Alasan desain ini paling tepat
+
+1. **Deterministic substrate tetap menjadi sumber kebenaran operasional.**
+   Parsing, timestamp, timeline, correlation, detection, dan risk tidak boleh
+   diserahkan ke model probabilistik.
+2. **Agent diberi autonomy secukupnya.** Agent dapat memilih urutan pencarian,
+   memperbarui hypothesis, mencari evidence yang membantah, dan berhenti saat
+   bukti kurang; agent tidak dapat mengubah sistem eksternal.
+3. **Case boundary menjadi batas keamanan utama.** Semua query, evidence ID,
+   memory, external snapshot, dan report harus terikat case aktif.
+4. **MCP berada di belakang Tool Policy.** Model tidak menerima arbitrary DSL,
+   credential, atau koneksi langsung ke SIEM.
+5. **Verifier berada setelah LLM dan sebelum UI.** Draft model tidak pernah
+   menjadi jawaban final tanpa pemeriksaan evidence dan semantic support.
+6. **Human-in-the-loop tetap eksplisit.** Jika kelak ditambahkan action tool,
+   tool tersebut harus berada pada capability tier R1/R2/R3 dan memerlukan
+   approval manusia, audit, serta rollback.
+
+#### Critical path yang harus dipertahankan
+
+```text
+Upload
+  -> validate + SHA-256 + UUID evidence
+  -> enqueue asynchronous job
+  -> parser deterministic
+  -> canonical event
+  -> timeline/correlation/detection/risk
+  -> investigator question
+  -> VIGIL plan + read-only tool calls
+  -> evidence ledger + hypothesis/gap update
+  -> structured claim
+  -> verification gate
+  -> verified answer atau abstention
+```
+
+Kegagalan di setiap tahap harus fail-closed: file malformed masuk quarantine
+atau gagal, provider LLM gagal menjadi provider failure, evidence tidak cukup
+menjadi abstention, dan claim unsupported tidak ditampilkan.
+
+#### Target non-functional requirement bertahap
+
+| Area | Target staging/beta | Cara verifikasi |
+|---|---|---|
+| Availability API | 99,5% bulanan | Prometheus/SLO dan error budget |
+| Read latency | p95 endpoint read < 500 ms | load test terukur |
+| Agent latency | p95 bounded run < 60 s tanpa provider outage | trace latency dan timeout test |
+| Upload | 50 MiB default dengan streaming limit | security/integration test |
+| Evidence durability | RPO <= 1 jam, RTO <= 4 jam | backup/restore drill |
+| Isolation | cross-case leakage target 0 | authorization matrix dan RLS/E2E |
+| Safety | unauthorized write action target 0 | capability test; saat ini write tool tidak tersedia |
+| Audit | semua upload, tool, claim, export tercatat | audit completeness test |
+
+Target tersebut adalah acceptance criteria yang harus diukur, bukan klaim bahwa
+semuanya sudah terpenuhi pada local development.
+
+#### Keputusan arsitektur yang ditolak
+
+- **LLM sebagai parser utama:** ditolak karena menurunkan reproducibility dan
+  mempersulit provenance.
+- **Multi-agent kosmetik:** ditolak karena menambah trust boundary tanpa bukti
+  peningkatan kualitas pada scope penelitian saat ini.
+- **Model mengakses database langsung:** ditolak karena membuka arbitrary query,
+  IDOR, dan credential blast radius.
+- **Active response default:** ditolak karena konsekuensi tinggi; hanya boleh
+  muncul setelah approval gate dan rollback tersedia.
+- **External SIEM sebagai sumber citation langsung:** ditolak; hasil harus
+  disnapshot, di-hash, dan diberi UUID lokal terlebih dahulu.
+
+#### Tahapan menuju production
+
+1. **R0 — Research/demo:** Compose, local evidence volume, read-only agent,
+   golden fixture, claim gate, dan audit aplikasi.
+2. **R1 — Staging:** managed PostgreSQL/Redis, object storage terenkripsi,
+   secret manager, TLS, backup drill, user quota, RLS defense-in-depth,
+   provider fixture/replay, dan adversarial test.
+3. **R2 — Beta terbatas:** external append-only audit, load/soak test,
+   gate-off/on comparison, corpus eksternal, independent red-team, SLO alert,
+   dan signed release checklist.
+4. **R3 — Action-enabled ops (opsional):** capability token, approval manusia
+   minimal dua pihak untuk action berisiko, dry-run, rollback, dan audit
+   immutable. Tahap ini tidak diperlukan untuk tujuan MVP investigasi read-only.
+
+Dengan struktur tersebut, TraceLens tetap sederhana untuk dipelajari namun
+memiliki jalur evolusi yang jelas ke beta operasional tanpa mengorbankan
+evidence grounding, keamanan case, atau auditability.
+
+### 13. VIGIL Phase 2: reliability dan evaluasi
+
+Implementasi Phase 2 menambahkan state machine eksplisit dan policy engine
+deterministik di antara LLM gateway dan executor. Agent hanya mengusulkan
+operasi; policy memeriksa transisi lifecycle, allowlist tool, case boundary,
+budget, repair, replan, hypothesis update, dan stop reason.
+
+State operasional juga menyimpan evidence quality (integrity, parser,
+timestamp, directness, source, corroboration), contradiction matrix
+`SUPPORTS/CONTRADICTS/NEUTRAL/UNKNOWN`, hypothesis revision history,
+candidate action ranking, estimated cost, useful evidence, no-progress, serta
+stop state. Nilai quality bukan probabilitas serangan.
+
+Setiap run selesai disnapshot dengan hash kanonik. Endpoint deterministic replay
+tidak memanggil model; model re-evaluation belum diaktifkan karena memerlukan
+provider fixture yang dibekukan. Run diff bersifat deskriptif dan tidak memilih
+run yang lebih benar secara otomatis. Evaluasi offline disimpan bersama fixture
+dan test di `backend/evals/`, sehingga dapat direproduksi tanpa provider live.
+
+#### Goal-aware planning pada Phase 2+
+
+Planner memakai `investigation-plan-v2` dan memilih playbook deterministic
+berdasarkan tujuan pertanyaan: authentication, web activity,
+execution/persistence, evidence integrity, atau general investigation. Setiap
+playbook memuat pertanyaan operasional, expected evidence, urutan tool yang
+relevan, dan `success_contract`.
+
+`success_contract` bukan skor serangan. Ia adalah kontrak supervisor untuk
+menentukan apakah agent sudah mengumpulkan observasi minimum, sudah mencoba
+disconfirming search, serta sudah memiliki evidence ID dan limitation sebelum
+menyatakan goal selesai. Jika kontrak tidak terpenuhi, agent tetap dapat
+replan, meminta bukti tambahan, atau berhenti sebagai insufficient evidence.
+
+#### Case memory antar-run
+
+Run baru pada case yang sama dapat menghidrasi memori terkurasi dari maksimal
+lima run selesai sebelumnya. Memory `case-memory-v2` hanya membawa entity yang
+telah tercatat, pola benign, hipotesis yang ditolak, pertanyaan selesai, dan
+evidence UUID lokal. Hanya run dengan claim yang lolos verification gate yang
+boleh menjadi sumber memory berikutnya; run abstain, gagal, atau provider-error
+dikeluarkan. Raw prompt, raw log, chain-of-thought, secret, serta state dari
+case lain tidak ikut. Jika history query gagal, fallback-nya adalah memory
+kosong dan investigasi read-only tetap dapat berjalan.
+
+Perubahan ini memperluas perilaku agent tanpa memperluas privilege: LLM masih
+hanya mengusulkan langkah, sedangkan classifier, policy, executor, verifier,
+dan case boundary tetap deterministic. Peningkatan dapat diukur per playbook
+melalui tool efficiency, stop-decision accuracy, evidence completeness, dan
+unsupported-claim rate.
+
+### 14. Review arsitektur terbaru
+
+#### Verdict
+
+Arsitektur ini sudah tepat untuk **beta operasional read-only** dan layak
+digunakan sebagai arsitektur referensi saat presentasi. Nilai indikatif untuk
+arsitektur teknis saat ini adalah **9,0/10**. Nilai ini bukan sertifikasi
+keamanan, bukan jaminan availability, dan tidak boleh dipakai sebagai bukti
+forensic-grade.
+
+#### Bentuk final yang direkomendasikan
+
+```text
+Investigator / SOC reviewer
+        |
+        v HTTPS + session/CSRF
+Next.js Investigator UI
+        |
+        v REST / multipart
+FastAPI Case Boundary
+        |-- PostgreSQL: system of record
+        |-- Redis/Celery: queue, lock, retry, watchdog
+        |-- Evidence storage: UUID + SHA-256 + immutable bytes
+        |-- Deterministic analysis plane
+        |     parser -> canonical event -> timeline -> correlation
+        |     -> detection -> risk -> findings
+        `-- VIGIL Supervisor
+              |-- goal, plan, lifecycle, budget, stop state
+              |-- Tool Policy: allowlist + case scope + capability
+              |-- local read-only tools / private MCP adapters
+              |-- untrusted observation + evidence ledger
+              |-- hypothesis, contradiction, gap, replanning
+              `-- Claim Verification Gate
+                    |-- verified claims -> UI/report/audit
+                    `-- unsupported -> repair <= 2 atau abstention
+```
+
+LLM berada di dalam VIGIL Supervisor sebagai komponen pengusul langkah. LLM
+tidak pernah menjadi parser, sumber urutan timeline, pemilik koneksi database,
+atau pemanggil write action. Executor deterministik dan policy engine tetap
+menentukan apakah usulan model boleh dijalankan.
+
+#### Kekuatan yang terverifikasi di repository
+
+1. Boundary deterministic dan probabilistic terpisah dengan jelas.
+2. Semua tool agent allowlisted, bounded, read-only, dan case-scoped.
+3. Evidence memiliki provenance, ledger, quality metadata, dan snapshot hash.
+4. VIGIL memiliki lifecycle transition, budget, no-progress, hypothesis
+   revision, contradiction matrix, repair bounded, dan structured stop.
+5. Claim gate berada di antara model dan UI; claim unsupported tidak ditampilkan.
+6. Replay trace bersifat deterministic dan tidak memanggil model.
+7. Default Compose telah diselaraskan dengan runtime saat ini: schema `0007`,
+   frontend `3001`, backend `8002`, serta Groq sebagai provider aktif.
+
+#### Batas keamanan yang wajib dipertahankan
+
+- Raw log, URL, user-agent, dan hasil SIEM selalu diperlakukan sebagai data
+  tidak tepercaya.
+- Model tidak boleh menerima arbitrary SQL, DSL, credential, atau `case_id`
+  yang dapat mengganti case aktif.
+- External evidence harus di-snapshot, di-hash, dan diberi UUID lokal sebelum
+  boleh menjadi citation.
+- Jika provider gagal, budget habis, evidence berkontradiksi, atau verifier
+  gagal, sistem harus berhenti dengan status yang jujur.
+- Evidence quality dan risk score adalah kualitas dukungan/indikasi rule, bukan
+  probabilitas attacker atau bukti kompromi.
+
+#### Gap yang masih mencegah label 10/10
+
+1. Belum ada model re-evaluation replay dengan provider fixture yang dibekukan.
+2. Red-team independen, corpus eksternal berlabel, dan uji gate-off/on reviewer
+   masih harus diperluas.
+3. Load/soak, concurrency/idempotency, backup-restore RPO/RTO, dan HA belum
+   dibuktikan pada deployment staging.
+4. TLS/WAF, secret manager, PostgreSQL RLS, object storage terenkripsi, dan
+   audit append-only eksternal masih merupakan gate deployment.
+5. Provider eksternal default off; live Groq/MCP bukan dependency demo yang
+   dapat diandalkan.
+
+#### Keputusan review
+
+Pertahankan **bounded single-agent di atas deterministic analysis plane**.
+Jangan menambah multi-agent kosmetik atau active response sebelum ada
+capability token, approval manusia, rollback, dan audit immutable. Prioritas
+berikutnya adalah staging hardening, replay/evaluation yang dapat diaudit,
+tamper-evident audit sink, serta pengukuran NFR—bukan menambah jumlah agent.
+
+Dokumen prompt agent: [TRACELENS_AGENT_PROMPTS_ID.md](TRACELENS_AGENT_PROMPTS_ID.md).
+
+Paket diagram untuk proposal metodologi, termasuk arsitektur konteks, DFD
+Level 0/1, flowchart penelitian dan sistem, ERD, alur VIGIL, state machine,
+use case, serta deployment tersedia di
+[PROPOSAL_METHODOLOGY_DIAGRAMS_ID.md](PROPOSAL_METHODOLOGY_DIAGRAMS_ID.md).
+
+Bukti eksekusi, evaluator, runtime smoke, scope, dan batas validasi tersedia di
+[TEST_EVIDENCE_REPORT_ID.md](TEST_EVIDENCE_REPORT_ID.md).

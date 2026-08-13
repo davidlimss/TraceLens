@@ -38,6 +38,14 @@ def test_correlation_has_human_readable_reason():
     assert ip_correlation.time_delta_seconds == 240
 
 
+def test_correlation_deduplicates_retried_duplicate_events():
+    first = event(minute=0, line=1, outcome="failure")
+    second = event(minute=1, line=2, outcome="failure")
+    correlations = build_correlations([first, second, first, second], window_minutes=5)
+    keys = [(item.event_id, item.related_event_id, item.entity_type) for item in correlations]
+    assert len(keys) == len(set(keys))
+
+
 def test_brute_force_then_success_creates_high_risk_explainable_finding():
     evidence_a, evidence_b = uuid.uuid4(), uuid.uuid4()
     failures = [event(minute=minute, line=minute + 1, outcome="failure", evidence=evidence_a) for minute in range(5)]

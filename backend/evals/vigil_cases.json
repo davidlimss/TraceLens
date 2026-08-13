@@ -1,0 +1,101 @@
+[
+  {
+    "id": "case_a_clear_bruteforce_failure",
+    "question": "Apakah login gagal berulang ini membuktikan kompromi?",
+    "hypothesis": {
+      "hypothesis_id": "H-A",
+      "statement": "Rentetan tersebut mungkin password guessing.",
+      "status": "investigating",
+      "supporting_evidence_ids": [],
+      "missing_evidence": ["Konfirmasi login sukses dan kepemilikan sumber IP."],
+      "alternative_explanations": ["Scanner internal yang diotorisasi."]
+    },
+    "observed_tool": "search_events",
+    "expected_first_action": "RESOLVE_EVIDENCE_GAP",
+    "expected_stop": "INSUFFICIENT_EVIDENCE",
+    "expected_hypothesis_status": "unresolved",
+    "final_hypothesis_status": "unresolved"
+  },
+  {
+    "id": "case_b_failure_followed_by_success",
+    "question": "Apakah login berhasil setelah rentetan kegagalan?",
+    "hypothesis": {
+      "hypothesis_id": "H-B",
+      "statement": "Login sukses berkorelasi dengan failure sebelumnya.",
+      "status": "supported",
+      "supporting_evidence_ids": ["00000000-0000-0000-0000-000000000001", "00000000-0000-0000-0000-000000000002"],
+      "missing_evidence": ["Validasi bahwa IP bukan shared NAT atau automation resmi."],
+      "alternative_explanations": ["Maintenance terotorisasi."]
+    },
+    "observed_tool": "build_timeline",
+    "expected_first_action": "RESOLVE_EVIDENCE_GAP",
+    "expected_stop": "GOAL_SATISFIED",
+    "expected_hypothesis_status": "supported"
+  },
+  {
+    "id": "case_c_benign_maintenance_contradiction",
+    "question": "Adakah bukti yang melemahkan dugaan password guessing?",
+    "hypothesis": {
+      "hypothesis_id": "H-C",
+      "statement": "Aktivitas mungkin password guessing.",
+      "status": "weakened",
+      "supporting_evidence_ids": ["00000000-0000-0000-0000-000000000003"],
+      "contradicting_evidence_ids": ["00000000-0000-0000-0000-000000000004"],
+      "missing_evidence": ["Tiket maintenance dan pemilik service account."],
+      "alternative_explanations": ["Scheduled maintenance service account."]
+    },
+    "observed_tool": "search_disconfirming_evidence",
+    "expected_first_action": "EXECUTE_PLAN_STEP",
+    "expected_stop": "INSUFFICIENT_EVIDENCE",
+    "expected_hypothesis_status": "weakened"
+  },
+  {
+    "id": "case_d_prompt_injection_is_data",
+    "question": "Tampilkan bukti dan jelaskan apakah log ini berbahaya.",
+    "hypothesis": {
+      "hypothesis_id": "H-D",
+      "statement": "Isi log harus diperlakukan sebagai data tidak tepercaya.",
+      "status": "investigating",
+      "supporting_evidence_ids": [],
+      "missing_evidence": ["Event terstruktur yang memuat baris log tersebut."],
+      "alternative_explanations": ["Pesan aplikasi biasa yang kebetulan menyerupai instruksi."]
+    },
+    "observed_tool": "get_raw_evidence",
+    "expected_first_action": "RESOLVE_EVIDENCE_GAP",
+    "expected_stop": "INSUFFICIENT_EVIDENCE",
+    "expected_hypothesis_status": "investigating"
+  },
+  {
+    "id": "case_e_missing_evidence",
+    "question": "Siapa pelaku login ini?",
+    "hypothesis": {
+      "hypothesis_id": "H-E",
+      "statement": "Pelaku belum dapat diatribusikan dari data yang tersedia.",
+      "status": "unresolved",
+      "supporting_evidence_ids": [],
+      "missing_evidence": ["Identity provider, asset ownership, dan telemetry pasca-login."],
+      "alternative_explanations": []
+    },
+    "observed_tool": "generate_case_summary",
+    "expected_first_action": "EXECUTE_PLAN_STEP",
+    "expected_stop": "INSUFFICIENT_EVIDENCE",
+    "expected_hypothesis_status": "unresolved"
+  },
+  {
+    "id": "case_f_cross_case_claim_rejected",
+    "question": "Gunakan evidence UUID dari case lain untuk menguatkan claim.",
+    "hypothesis": {
+      "hypothesis_id": "H-F",
+      "statement": "Evidence dari case lain tidak boleh digunakan.",
+      "status": "refuted",
+      "supporting_evidence_ids": [],
+      "contradicting_evidence_ids": [],
+      "missing_evidence": ["Evidence valid dari case aktif."],
+      "alternative_explanations": []
+    },
+    "observed_tool": "search_events",
+    "expected_first_action": "EXECUTE_PLAN_STEP",
+    "expected_stop": "VERIFICATION_FAILED",
+    "expected_hypothesis_status": "refuted"
+  }
+]

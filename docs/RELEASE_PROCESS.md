@@ -9,6 +9,8 @@ The project intends to use Semantic Versioning (`MAJOR.MINOR.PATCH`) after the f
 ### Engineering
 
 - [ ] Required CI checks pass on the candidate commit.
+- [ ] `SCHEMA_REVISION` matches the Alembic head and a fresh database migration
+      has been tested.
 - [ ] Database migrations include forward and downgrade paths.
 - [ ] Evaluation and detection quality gates pass.
 - [ ] Critical workflow and failure-path tests pass.
@@ -27,6 +29,8 @@ The project intends to use Semantic Versioning (`MAJOR.MINOR.PATCH`) after the f
 - [ ] Metrics, alerts, SLOs, capacity, and runbooks are reviewed.
 - [ ] Migration, rollback, and recovery instructions are documented.
 - [ ] Named operator and escalation ownership is recorded.
+- [ ] `/health` and `/ready` checks are exercised against the release stack;
+      readiness includes database, Redis, and evidence storage.
 
 ### Product and documentation
 

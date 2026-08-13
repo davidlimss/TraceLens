@@ -3,6 +3,29 @@
 __pycache__/
 .pytest_cache/
 *.py[cod]
+*.tsbuildinfo
+.coverage
+htmlcov/
+.ruff_cache/
+.mypy_cache/
 backend/storage/
 frontend/node_modules/
 frontend/.next/
+
+# Local proposal exports and review scratch files; keep the product repository
+# focused on source, tests, reproducibility, and maintained documentation.
+.tmp_*
+*.tmp
+github_UAS_AI.txt
+proposal_existing_dump.txt
+docs/proposal_assets/
+docs/PROPOSAL_METHODOLOGY_DIAGRAMS_ID.md
+scripts/build_*proposal.py
+
+# Local academic proposal/research working documents are not product source.
+docs/ANALISIS_PROJECT_PROPOSAL.md
+docs/BLUEPRINT_PROPOSAL_TRACELES_AI.md
+docs/DRAFT_PROPOSAL_TRACELES_AI.md
+docs/LITERATURE_SEARCH_LOG.md
+docs/MATRIKS_PENELITIAN_TERKAIT.md
+docs/VALIDASI_FOKUS_PENELITIAN.md

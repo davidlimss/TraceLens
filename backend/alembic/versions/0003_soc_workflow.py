@@ -13,14 +13,23 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.add_column("findings", sa.Column("workflow_status", sa.String(32), nullable=False, server_default="new"))
-    op.add_column("findings", sa.Column("disposition", sa.String(64), nullable=True))
-    op.add_column("findings", sa.Column("assigned_to", sa.String(128), nullable=True))
-    op.add_column("findings", sa.Column("analyst_notes", sa.JSON(), nullable=False, server_default="[]"))
-    op.add_column("findings", sa.Column("workflow_updated_at", sa.DateTime(timezone=True), nullable=True))
-    op.create_index("ix_findings_workflow_status", "findings", ["workflow_status"])
-    op.create_index("ix_findings_disposition", "findings", ["disposition"])
-    op.create_index("ix_findings_assigned_to", "findings", ["assigned_to"])
+    inspector = sa.inspect(op.get_bind())
+    columns = {item["name"] for item in inspector.get_columns("findings")}
+    indexes = {item["name"] for item in inspector.get_indexes("findings")}
+    for name, column in (
+        ("workflow_status", sa.Column("workflow_status", sa.String(32), nullable=False, server_default="new")),
+        ("disposition", sa.Column("disposition", sa.String(64), nullable=True)),
+        ("assigned_to", sa.Column("assigned_to", sa.String(128), nullable=True)),
+        ("analyst_notes", sa.Column("analyst_notes", sa.JSON(), nullable=False, server_default="[]")),
+        ("workflow_updated_at", sa.Column("workflow_updated_at", sa.DateTime(timezone=True), nullable=True)),
+    ):
+        if name not in columns:
+            op.add_column("findings", column)
+    for name, column in (("ix_findings_workflow_status", "workflow_status"),
+                         ("ix_findings_disposition", "disposition"),
+                         ("ix_findings_assigned_to", "assigned_to")):
+        if name not in indexes:
+            op.create_index(name, "findings", [column])
 
 
 def downgrade() -> None:

@@ -5,6 +5,8 @@ This roadmap communicates intent, not a contractual delivery commitment. Priorit
 ## Now — Alpha hardening
 
 - Stabilize supported parsers and canonical schema.
+- Keep Alembic schema checks, dependency readiness, and login protection
+  enforced in every deployment.
 - Expand regression coverage for evidence and cross-case isolation.
 - Keep AI claim verification and provider-limit handling deterministic and observable.
 - Establish repository governance, CI gates, runbooks, and release discipline.

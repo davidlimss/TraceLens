@@ -13,6 +13,11 @@ depends_on = None
 
 
 def upgrade() -> None:
+    inspector = sa.inspect(op.get_bind())
+    existing_event_columns = {item["name"] for item in inspector.get_columns("events")}
+    existing_finding_columns = {item["name"] for item in inspector.get_columns("findings")}
+    event_indexes = {item["name"] for item in inspector.get_indexes("events")}
+    finding_indexes = {item["name"] for item in inspector.get_indexes("findings")}
     event_columns = [
         ("event_code", sa.String(128)), ("command_line", sa.Text()),
         ("parent_process_name", sa.String(512)), ("source_port", sa.Integer()),
@@ -21,16 +26,28 @@ def upgrade() -> None:
         ("url_path", sa.Text()), ("user_agent", sa.Text()), ("file_hash", sa.String(128)),
     ]
     for name, column_type in event_columns:
-        op.add_column("events", sa.Column(name, column_type, nullable=True))
-    op.create_index("ix_events_event_code", "events", ["event_code"])
-    op.create_index("ix_events_file_hash", "events", ["file_hash"])
-    op.add_column("findings", sa.Column("confidence_score", sa.Float(), nullable=False, server_default="0.5"))
-    op.add_column("findings", sa.Column("confidence_breakdown", sa.JSON(), nullable=False, server_default=sa.text("'{}'::json")))
-    op.add_column("findings", sa.Column("mitre_technique", sa.String(32), nullable=True))
-    op.add_column("findings", sa.Column("mitre_tactic", sa.String(64), nullable=True))
-    op.add_column("findings", sa.Column("false_positive_considerations", sa.JSON(), nullable=False, server_default=sa.text("'[]'::json")))
-    op.add_column("findings", sa.Column("recommended_queries", sa.JSON(), nullable=False, server_default=sa.text("'[]'::json")))
-    op.create_index("ix_findings_mitre_technique", "findings", ["mitre_technique"])
+        if name not in existing_event_columns:
+            op.add_column("events", sa.Column(name, column_type, nullable=True))
+    if "ix_events_event_code" not in event_indexes:
+        op.create_index("ix_events_event_code", "events", ["event_code"])
+    if "ix_events_file_hash" not in event_indexes:
+        op.create_index("ix_events_file_hash", "events", ["file_hash"])
+    finding_columns = [
+        ("confidence_score", sa.Float(), False, "0.5"),
+        ("confidence_breakdown", sa.JSON(), False, sa.text("'{}'::json")),
+        ("mitre_technique", sa.String(32), True, None),
+        ("mitre_tactic", sa.String(64), True, None),
+        ("false_positive_considerations", sa.JSON(), False, sa.text("'[]'::json")),
+        ("recommended_queries", sa.JSON(), False, sa.text("'[]'::json")),
+    ]
+    for name, column_type, nullable, default in finding_columns:
+        if name not in existing_finding_columns:
+            kwargs = {"nullable": nullable}
+            if default is not None:
+                kwargs["server_default"] = default
+            op.add_column("findings", sa.Column(name, column_type, **kwargs))
+    if "ix_findings_mitre_technique" not in finding_indexes:
+        op.create_index("ix_findings_mitre_technique", "findings", ["mitre_technique"])
 
 
 def downgrade() -> None:
